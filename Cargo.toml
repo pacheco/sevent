@@ -1,0 +1,15 @@
+[package]
+name = "evmsg"
+version = "0.1.0"
+authors = ["Leandro Pacheco <contact@leandropacheco.com>"]
+
+[dependencies]
+log = "0.3"
+env_logger = "0.4"
+mio = "0.6"
+mio-more = "0.1"
+slab = "0.4"
+lazycell = "0.5"
+
+[profile.release]
+debug = true
