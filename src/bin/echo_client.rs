@@ -1,11 +1,10 @@
 extern crate evmsg;
-use evmsg::v2;
 
 struct Echo;
 
-impl v2::ConnectionHandler for Echo {
+impl evmsg::ConnectionHandler for Echo {
     fn on_read(&mut self, id: usize, buf: &mut Vec<u8>) {
-        v2::connection_write(id, |wbuf| {
+        evmsg::connection_write(id, |wbuf| {
             wbuf.extend(buf.drain(..));
         });
     }
@@ -16,20 +15,20 @@ impl v2::ConnectionHandler for Echo {
 }
 
 fn main() {
-    v2::run_evloop(|| {
+    evmsg::run_evloop(|| {
         let addr = "127.0.0.1:10000".parse().unwrap();
-        let id = v2::add_connect(addr, |res| {
+        let id = evmsg::add_connect(addr, |res| {
             match res {
                 Ok(stream) => {
                     println!("connected!");
-                    let id = v2::add_connection(stream, Echo).unwrap();
-                    v2::connection_write(id, |wbuf| {
+                    let id = evmsg::add_connection(stream, Echo).unwrap();
+                    evmsg::connection_write(id, |wbuf| {
                         wbuf.extend(0..32);
                     });
                 }
                 Err(err) => {
                     println!("connect error {:?}", err);
-                    v2::shutdown();
+                    evmsg::shutdown();
                 }
             }
         });

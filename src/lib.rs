@@ -7,17 +7,30 @@ extern crate bytes;
 
 pub mod errors;
 pub use errors::Error;
-pub mod handler;
-pub mod v2;
 
+mod connection;
+use self::connection::Connection;
+pub use self::connection::ConnectionHandler;
+pub use self::connection::ConnectionHandlerClosures;
+pub use self::connection::connection_write;
+mod connect;
+use self::connect::Connect;
+pub use self::connect::ConnectHandler;
+mod listener;
+use self::listener::Listener;
+pub use self::listener::AcceptHandler;
+
+use std::net::SocketAddr;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mio::Poll;
-use mio::PollOpt;
 use mio::Events;
+use mio::Poll;
 use mio::Ready;
+use mio::PollOpt;
 use mio::Token;
+use mio::net::TcpListener;
+use mio::net::TcpStream;
 use mio::event::Evented;
 
 use slab::Slab;
@@ -27,59 +40,18 @@ use lazycell::LazyCell;
 thread_local! {
     static POLL: LazyCell<Poll> = LazyCell::new();
     static SHUTDOWN: RefCell<bool> = RefCell::new(false);
-    static HANDLERS: RefCell<Slab<Rc<RefCell<EventHandler>>>> = RefCell::new(Slab::new());
+    static SLAB: RefCell<Slab<Context>> = RefCell::new(Slab::new());
 }
 
-pub trait EventHandler: Evented {
-    fn ready(&self, self_id: usize, ready: Ready);
+#[derive(Clone)]
+pub enum Context {
+    Connection(Rc<Connection>),
+    Connect(Rc<Connect>),
+    Listener(Rc<Listener>),
 }
 
-pub fn register(handler: Rc<RefCell<EventHandler>>, ready: Ready, opt: PollOpt) -> Result<usize, Error> {
-    HANDLERS.with(|h| {
-        let id = h.borrow_mut().insert(handler);
-        POLL.with(|p| {
-            debug!("registering new handler {}", id);
-            let poll = p.borrow().expect("outside event loop!");
-            let h = h.borrow();
-            let evented = h.get(id).unwrap().borrow();
-            poll.register(&*evented, Token(id), ready, opt)?;
-            Ok(id)
-        })
-    })
-}
-
-pub fn reregister(id: usize, ready: Ready, opt: PollOpt) -> Result<(), Error> {
-    HANDLERS.with(|h| {
-        let h = h.borrow();
-        let handler = h.get(id).ok_or(Error::InvalidId)?;
-        POLL.with(|p| {
-            debug!("reregistering handler {}", id);
-            let poll = p.borrow().expect("outside event loop!");
-            poll.reregister(&*handler.borrow(), Token(id), ready, opt)?;
-            Ok(())
-        })
-    })
-}
-
-pub fn deregister(id: usize) -> Result<(), Error> {
-    HANDLERS.with(|h| {
-        let mut h = h.borrow_mut();
-        let handler = if h.contains(id) {
-            h.remove(id)
-        } else {
-            return Err(Error::InvalidId);
-        };
-        POLL.with(|p| {
-            debug!("deregistering handler {}", id);
-            let poll = p.borrow().expect("outside event loop!");
-            poll.deregister(&*handler.borrow())?;
-            Ok(())
-        })
-    })
-}
-
-pub fn run_loop_with<F>(init: F) -> Result<(), Error>
-    where F: FnOnce() -> Result<(), Error>,
+pub fn run_evloop<F>(init: F) -> Result<(), Error>
+    where F: FnOnce() -> Result<(), Error>
 {
     POLL.with(|p| -> Result<(), Error> {
         let poll = Poll::new()?;
@@ -94,17 +66,120 @@ pub fn run_loop_with<F>(init: F) -> Result<(), Error>
             for event in events.iter() {
                 let id: usize = event.token().into();
                 debug!("events for {}: {:?}", id, event.readiness());
-                HANDLERS.with(|h| {
-                    let ctx_opt = {
-                        h.borrow().get(id).map(|ctx| ctx.clone())
+                SLAB.with(|slab| {
+                    let ctx = {
+                        let slab = slab.borrow();
+                        slab.get(id).expect("invalid event id").clone()
                     };
-                    ctx_opt.map(|ctx| {
-                        ctx.borrow().ready(id, event.readiness());
-                    });
+                    match ctx {
+                        Context::Connect(connect) => {
+                            Connect::ready(connect, event.readiness());
+                        }
+                        Context::Connection(connection) => {
+                            connection.ready(event.readiness());
+                        }
+                        Context::Listener(listener) => {
+                            listener.ready(event.readiness());
+                        }
+                    }
                 });
             }
         }
         Ok(())
     })?;
     Ok(())
+}
+
+pub fn shutdown() {
+    SHUTDOWN.with(|s| {
+        *s.borrow_mut() = true;
+    })
+}
+
+pub fn add_listener<H: 'static + AcceptHandler>(listener: TcpListener, handler: H) -> Result<usize, Error> {
+    SLAB.with(|slab| {
+        let mut slab = slab.borrow_mut();
+        let e = slab.vacant_entry();
+        let id = e.key();
+        poll_register(id, &listener, Ready::readable(), PollOpt::edge());
+        let listener = Listener {
+            id,
+            inner: RefCell::new(listener),
+            handler: RefCell::new(Box::new(handler)),
+        };
+        let ctx = Context::Listener(Rc::new(listener));
+        e.insert(ctx);
+        Ok(id)
+    })
+}
+
+pub fn add_connection<H: 'static + ConnectionHandler>(stream: TcpStream, handler: H) -> Result<usize, Error> {
+    SLAB.with(|slab| {
+        let mut slab = slab.borrow_mut();
+        let e = slab.vacant_entry();
+        let id = e.key();
+        let conn = Connection::new_registered(id, stream, handler)?;
+        let ctx = Context::Connection(Rc::new(conn));
+        e.insert(ctx);
+        Ok(id)
+    })
+}
+
+pub fn add_connect<H: 'static + ConnectHandler>(addr: SocketAddr, handler: H) -> Result<usize, Error> {
+    SLAB.with(|slab| {
+        let mut slab = slab.borrow_mut();
+        let e = slab.vacant_entry();
+        let id = e.key();
+        let stream = TcpStream::connect(&addr)?;
+        poll_register(id, &stream, Ready::writable(), PollOpt::edge());
+        let connect = Connect {
+            id,
+            inner: RefCell::new(stream),
+            handler: RefCell::new(Box::new(handler)),
+        };
+        let ctx = Context::Connect(Rc::new(connect));
+        e.insert(ctx);
+        Ok(id)
+    })
+}
+
+pub fn del(id: usize) -> Result<(), Error> {
+    SLAB.with(|slab| {
+        let mut slab = slab.borrow_mut();
+        if slab.contains(id) {
+            POLL.with(|p| {
+                let poll = p.borrow().expect("not inside evloop");
+                match slab.remove(id) {
+                    Context::Connect(connect) => {
+                        poll.deregister(&*connect.inner.borrow()).expect("error deregistering");
+                    }
+                    Context::Connection(connection) => {
+                        poll.deregister(&*connection.inner.borrow()).expect("error deregistering");
+                    }
+                    Context::Listener(listener) => {
+                        poll.deregister(&*listener.inner.borrow()).expect("error deregistering");
+                    }
+                }
+            });
+            Ok(())
+        } else {
+            Err(Error::InvalidId)
+        }
+    })
+}
+
+fn poll_register<E: Evented>(id: usize, evented: &E, ready: Ready, opt: PollOpt) {
+    println!("registering {}", id);
+    POLL.with(|p| {
+        let poll = p.borrow().expect("not inside evloop");
+        poll.register(evented, Token(id), ready, opt).expect("error registering to evloop");
+    })
+}
+
+fn poll_reregister<E: Evented>(id: usize, evented: &E, ready: Ready, opt: PollOpt) {
+    println!("re-registering {}", id);
+    POLL.with(|p| {
+        let poll = p.borrow().expect("not inside evloop");
+        poll.reregister(evented, Token(id), ready, opt).expect("error registering to evloop");
+    })
 }
