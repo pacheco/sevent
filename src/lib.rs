@@ -30,8 +30,12 @@ use self::chan::Chan;
 use self::chan::ChanCtx;
 pub use self::chan::ChanHandler;
 
+mod timer;
+pub use self::timer::TimeoutHandler;
+
 pub mod ext;
 
+use std::time::Duration;
 use std::net::SocketAddr;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -46,6 +50,7 @@ use mio::net::TcpStream;
 use mio::event::Evented;
 
 use mio_more::channel;
+use mio_more::timer as mio_timer;
 
 use slab::Slab;
 
@@ -63,6 +68,7 @@ pub enum Context {
     Connect(Rc<Connect>),
     Listener(Rc<Listener>),
     Chan(Rc<Chan>),
+    Timer(Rc<RefCell<mio_timer::Timer<Box<TimeoutHandler>>>>),
 }
 
 pub fn run_evloop<F>(init: F) -> Result<(), Error>
@@ -71,7 +77,22 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
     POLL.with(|p| -> Result<(), Error> {
         let poll = Poll::new()?;
         let poll = p.borrow_with(|| poll);
+
+        // register the timer
+        SLAB.with(|slab| {
+            let mut slab = slab.borrow_mut();
+            let e = slab.vacant_entry();
+            let id = e.key();
+            assert!(id == 0); // timer is always id 0
+            let t = mio_timer::Timer::default();
+            poll_register(id, &t, Ready::readable(), PollOpt::edge());
+            e.insert(Context::Timer(Rc::new(RefCell::new(t))));
+        });
+
+        // call the user init
         init()?;
+
+        // evloop until shutdown
         let mut events = Events::with_capacity(1024);
         loop {
             let shutdown = SHUTDOWN.with(|s| *s.borrow());
@@ -99,6 +120,16 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                         Context::Chan(chan) => {
                             chan.ready(event.readiness());
                         }
+                        Context::Timer(timer) => {
+                            loop {
+                                let p = timer.borrow_mut().poll();
+                                if let Some(timeout) = p {
+                                    timeout.timeout();
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
                     }
                 });
             }
@@ -111,6 +142,17 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
 pub fn shutdown() {
     SHUTDOWN.with(|s| {
         *s.borrow_mut() = true;
+    })
+}
+
+pub fn add_timeout<H: 'static + TimeoutHandler>(after: Duration, timeout: H) -> Result<mio_timer::Timeout, Error> {
+    SLAB.with(|slab| {
+        match slab.borrow().get(0).expect("global timer missing").clone() {
+            Context::Timer(timer) => {
+                timer.borrow_mut().set_timeout(after, Box::new(timeout)).map_err(|e| e.into())
+            }
+            _ => panic!("global timer missing"),
+        }
     })
 }
 
@@ -200,6 +242,9 @@ pub fn del(id: usize) -> Result<(), Error> {
                     Context::Chan(chan) => {
                         chan.deregister(&poll).expect("error deregistering");
                     }
+                    Context::Timer(_) => {
+                        panic!("cannot remove the global timer");
+                    }
                 }
             });
             Ok(())
@@ -210,7 +255,6 @@ pub fn del(id: usize) -> Result<(), Error> {
 }
 
 fn poll_register<E: Evented>(id: usize, evented: &E, ready: Ready, opt: PollOpt) {
-    println!("registering {}", id);
     POLL.with(|p| {
         let poll = p.borrow().expect("not inside evloop");
         poll.register(evented, Token(id), ready, opt).expect("error registering to evloop");
@@ -218,7 +262,6 @@ fn poll_register<E: Evented>(id: usize, evented: &E, ready: Ready, opt: PollOpt)
 }
 
 fn poll_reregister<E: Evented>(id: usize, evented: &E, ready: Ready, opt: PollOpt) {
-    println!("re-registering {}", id);
     POLL.with(|p| {
         let poll = p.borrow().expect("not inside evloop");
         poll.reregister(evented, Token(id), ready, opt).expect("error registering to evloop");
