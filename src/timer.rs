@@ -1,3 +1,5 @@
+// TODO: unboxed closures would make sense here but are unstable
+
 pub trait TimeoutHandler {
     fn timeout(self: Box<Self>);
 }
