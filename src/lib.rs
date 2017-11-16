@@ -4,6 +4,7 @@ extern crate mio;
 extern crate lazycell;
 extern crate slab;
 extern crate bytes;
+extern crate mio_more;
 
 pub mod errors;
 pub use errors::Error;
@@ -19,6 +20,10 @@ pub use self::connect::ConnectHandler;
 mod listener;
 use self::listener::Listener;
 pub use self::listener::AcceptHandler;
+mod chan;
+use self::chan::Chan;
+use self::chan::ChanCtx;
+pub use self::chan::ChanHandler;
 
 use std::net::SocketAddr;
 use std::cell::RefCell;
@@ -32,6 +37,8 @@ use mio::Token;
 use mio::net::TcpListener;
 use mio::net::TcpStream;
 use mio::event::Evented;
+
+use mio_more::channel;
 
 use slab::Slab;
 
@@ -48,6 +55,7 @@ pub enum Context {
     Connection(Rc<Connection>),
     Connect(Rc<Connect>),
     Listener(Rc<Listener>),
+    Chan(Rc<Chan>),
 }
 
 pub fn run_evloop<F>(init: F) -> Result<(), Error>
@@ -80,6 +88,9 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                         }
                         Context::Listener(listener) => {
                             listener.ready(event.readiness());
+                        }
+                        Context::Chan(chan) => {
+                            chan.ready(event.readiness());
                         }
                     }
                 });
@@ -143,6 +154,26 @@ pub fn add_connect<H: 'static + ConnectHandler>(addr: SocketAddr, handler: H) ->
     })
 }
 
+pub fn add_chan<H, T>(chan: channel::Receiver<T>, handler: H) -> Result<usize, Error>
+    where T: 'static,
+          H: 'static + ChanHandler<T>
+{
+    SLAB.with(|slab| {
+        let mut slab = slab.borrow_mut();
+        let e = slab.vacant_entry();
+        let id = e.key();
+        poll_register(id, &chan, Ready::readable(), PollOpt::edge());
+        let chan = ChanCtx {
+            id,
+            inner: RefCell::new(chan),
+            handler: RefCell::new(Box::new(handler)),
+        };
+        let ctx = Context::Chan(Rc::new(chan));
+        e.insert(ctx);
+        Ok(id)
+    })
+}
+
 pub fn del(id: usize) -> Result<(), Error> {
     SLAB.with(|slab| {
         let mut slab = slab.borrow_mut();
@@ -158,6 +189,9 @@ pub fn del(id: usize) -> Result<(), Error> {
                     }
                     Context::Listener(listener) => {
                         poll.deregister(&*listener.inner.borrow()).expect("error deregistering");
+                    }
+                    Context::Chan(chan) => {
+                        chan.deregister(&poll).expect("error deregistering");
                     }
                 }
             });
