@@ -3,9 +3,11 @@ extern crate log;
 extern crate mio;
 extern crate lazycell;
 extern crate slab;
+extern crate bytes;
 
 pub mod errors;
 pub use errors::Error;
+pub mod handler;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -92,7 +94,9 @@ pub fn run_loop_with<F>(init: F) -> Result<(), Error>
                 let id: usize = event.token().into();
                 debug!("events for {}: {:?}", id, event.readiness());
                 HANDLERS.with(|h| {
-                    let ctx_opt = Option::cloned(h.borrow_mut().get(id));
+                    let ctx_opt = {
+                        h.borrow().get(id).map(|ctx| ctx.clone())
+                    };
                     ctx_opt.map(|ctx| {
                         ctx.borrow().ready(id, event.readiness());
                     });
@@ -102,52 +106,4 @@ pub fn run_loop_with<F>(init: F) -> Result<(), Error>
         Ok(())
     })?;
     Ok(())
-}
-
-// --------------------------------
-
-pub struct EventFn<E: Evented, F: Fn(&mut E, usize, Ready)>(E, F);
-
-pub fn handler<E, F>(evented: E, f: F) -> Rc<RefCell<EventFn<E, F>>>
-    where E: Evented,
-          F: Fn(&mut E, usize, Ready),
-{
-    EventFn::new_wrapped(evented, f)
-}
-
-impl<E, F> EventFn<E, F>
-    where E: Evented,
-          F: Fn(&mut E, usize, Ready),
-{
-    pub fn new_wrapped(evented: E, f: F) -> Rc<RefCell<Self>> {
-        Rc::new(RefCell::new(EventFn(evented, f)))
-    }
-}
-
-impl<E, F> Evented for EventFn<E, F>
-    where E: Evented,
-          F: Fn(&mut E, usize, Ready),
-{
-    fn register(&self, poll: &Poll, id: Token, ready: Ready, opt: PollOpt) -> Result<(), std::io::Error> {
-        poll.register(&self.0, id, ready, opt)
-    }
-
-    fn reregister(&self, poll: &Poll, id: Token, ready: Ready, opt: PollOpt) -> Result<(), std::io::Error> {
-        poll.reregister(&self.0, id, ready, opt)
-    }
-
-    fn deregister(&self, poll: &Poll) -> Result<(), std::io::Error> {
-        poll.deregister(&self.0)
-    }
-}
-
-impl<E, F> EventHandler for EventFn<E, F>
-    where E: Evented,
-          F: Fn(&mut E, usize, Ready),
-{
-    fn ready(&self, self_id: usize, ready: Ready) {
-        let e = &self.0 as *const E as *mut E;
-        let f = &self.1;
-        unsafe { f(&mut *e, self_id, ready) }
-    }
 }
