@@ -8,6 +8,7 @@ extern crate bytes;
 pub mod errors;
 pub use errors::Error;
 pub mod handler;
+pub mod v2;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -50,7 +51,7 @@ pub fn register(handler: Rc<RefCell<EventHandler>>, ready: Ready, opt: PollOpt) 
 pub fn reregister(id: usize, ready: Ready, opt: PollOpt) -> Result<(), Error> {
     HANDLERS.with(|h| {
         let h = h.borrow();
-        let handler = h.get(id).ok_or(Error::InvalidHandlerId)?;
+        let handler = h.get(id).ok_or(Error::InvalidId)?;
         POLL.with(|p| {
             debug!("reregistering handler {}", id);
             let poll = p.borrow().expect("outside event loop!");
@@ -66,7 +67,7 @@ pub fn deregister(id: usize) -> Result<(), Error> {
         let handler = if h.contains(id) {
             h.remove(id)
         } else {
-            return Err(Error::InvalidHandlerId);
+            return Err(Error::InvalidId);
         };
         POLL.with(|p| {
             debug!("deregistering handler {}", id);

@@ -3,7 +3,7 @@ use std;
 #[derive(Debug)]
 pub enum Error {
     Io(std::io::Error),
-    InvalidHandlerId,
+    InvalidId,
 }
 
 impl From<std::io::Error> for Error {
