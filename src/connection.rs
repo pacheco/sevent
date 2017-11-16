@@ -33,8 +33,8 @@ pub struct ConnectionHandlerClosures<R,D>
     where R: FnMut(usize, &mut Vec<u8>),
           D: FnMut(usize, Option<Error>),
 {
-    on_read: R,
-    on_disconnect: D,
+    pub on_read: R,
+    pub on_disconnect: D,
 }
 
 pub struct Connection {
