@@ -5,6 +5,8 @@ extern crate lazycell;
 extern crate slab;
 extern crate bytes;
 extern crate mio_more;
+extern crate bincode;
+extern crate serde;
 
 pub mod errors;
 pub use errors::Error;
@@ -14,16 +16,21 @@ use self::connection::Connection;
 pub use self::connection::ConnectionHandler;
 pub use self::connection::ConnectionHandlerClosures;
 pub use self::connection::connection_write;
+
 mod connect;
 use self::connect::Connect;
 pub use self::connect::ConnectHandler;
+
 mod listener;
 use self::listener::Listener;
 pub use self::listener::AcceptHandler;
+
 mod chan;
 use self::chan::Chan;
 use self::chan::ChanCtx;
 pub use self::chan::ChanHandler;
+
+pub mod ext;
 
 use std::net::SocketAddr;
 use std::cell::RefCell;

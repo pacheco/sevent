@@ -6,11 +6,15 @@ authors = ["Leandro Pacheco <contact@leandropacheco.com>"]
 [dependencies]
 log = "0.3"
 env_logger = "0.4"
+lazycell = "0.5"
+
 mio = "0.6"
 mio-more = "0.1"
 slab = "0.4"
-lazycell = "0.5"
+
 bytes = "0.4"
+serde = "1.0"
+bincode = "0.9"
 
 [profile.release]
 debug = true
