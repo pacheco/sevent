@@ -13,28 +13,49 @@ use ::Error;
 const READ_SIZE: usize = 8*1024;
 
 pub trait ConnectionHandler {
-    fn on_read(&mut self, id: usize, buf: &mut Vec<u8>);
-    fn on_disconnect(&mut self, id: usize, error: Option<Error>);
+    /// called whenever there is new data in the connection's read buffer.
+    /// The default implementation simply discards read data.
+    #[allow(unused)]
+    fn on_read(&mut self, id: usize, buf: &mut Vec<u8>) {
+        buf.drain(..);
+    }
+    /// called when the connection is disconnected. There is no need
+    /// to call del: the connection automatically deletes itself on
+    /// disconnect.
+    /// IMPORTANT: it is NOT called when the connection is explicitly deleted.
+    #[allow(unused)]
+    fn on_disconnect(&mut self, id: usize, error: Option<Error>) {}
+    /// called whenever the connection completely empties is write buffer.
+    #[allow(unused)]
+    fn on_write_finished(&mut self, id: usize) {}
 }
 
-impl<R, D> ConnectionHandler for ConnectionHandlerClosures<R,D>
+pub struct ConnectionHandlerClosures<R,D,W>
     where R: FnMut(usize, &mut Vec<u8>),
           D: FnMut(usize, Option<Error>),
+          W: FnMut(usize),
+{
+    pub on_read: R,
+    pub on_disconnect: D,
+    pub on_write_finished: W,
+}
+
+impl<R, D, W> ConnectionHandler for ConnectionHandlerClosures<R,D,W>
+    where R: FnMut(usize, &mut Vec<u8>),
+          D: FnMut(usize, Option<Error>),
+          W: FnMut(usize),
 {
     fn on_read(&mut self, id: usize, buf: &mut Vec<u8>) {
         (self.on_read)(id, buf)
     }
+
     fn on_disconnect(&mut self, id: usize, error: Option<Error>) {
         (self.on_disconnect)(id, error)
     }
-}
 
-pub struct ConnectionHandlerClosures<R,D>
-    where R: FnMut(usize, &mut Vec<u8>),
-          D: FnMut(usize, Option<Error>),
-{
-    pub on_read: R,
-    pub on_disconnect: D,
+    fn on_write_finished(&mut self, id: usize) {
+        (self.on_write_finished)(id)
+    }
 }
 
 pub struct Connection {
@@ -58,7 +79,7 @@ pub fn connection_write<F>(id: usize, f: F)
                 f(&mut wbuf);
             }
             if was_empty {
-                connection.do_write(false);
+                connection.register_write();
             }
         }
     })
@@ -80,30 +101,49 @@ impl Connection {
         Ok(conn)
     }
 
-    fn do_write(&self, from_ready: bool) {
-        let mut wbuf = self.wbuf.borrow_mut();
-        let mut stream = self.inner.borrow_mut();
-        while !wbuf.is_empty() {
-            match stream.write(&wbuf[..]) {
-                Ok(n) => {
-                    wbuf.drain(..n);
-                }
-                Err(ref err) if err.kind() == WouldBlock => {
-                    break;
-                }
-                Err(err) => {
-                    error!("connection {}: {:?}", self.id, err);
-                    super::del(self.id).unwrap();
-                    let mut handler = self.handler.borrow_mut();
-                    handler.on_disconnect(self.id, Some(err.into()));
-                    return;
+    fn register_write(&self) {
+        let stream = self.inner.borrow();
+        super::poll_reregister(self.id, &*stream, Ready::readable() | Ready::writable(), PollOpt::edge());
+    }
+
+    fn do_write(&self) {
+        let wbuf_empty;
+        let mut write_err = None;
+        {
+            let mut stream = self.inner.borrow_mut();
+            let mut wbuf = self.wbuf.borrow_mut();
+            while !wbuf.is_empty() {
+                match stream.write(&wbuf[..]) {
+                    Ok(n) => {
+                        wbuf.drain(..n);
+                    }
+                    Err(ref err) if err.kind() == WouldBlock => {
+                        break;
+                    }
+                    Err(err) => {
+                        error!("connection {}: {:?}", self.id, err);
+                        write_err = Some(err);
+                        break;
+                    }
                 }
             }
+            wbuf_empty = wbuf.is_empty();
         }
-        if from_ready && wbuf.is_empty() {
-            super::poll_reregister(self.id, &*stream, Ready::readable(), PollOpt::edge());
-        } else if !from_ready && !wbuf.is_empty() {
-            super::poll_reregister(self.id, &*stream, Ready::readable() | Ready::writable(), PollOpt::edge());
+
+        if let Some(err) = write_err {
+            super::del(self.id).unwrap();
+            let mut handler = self.handler.borrow_mut();
+            handler.on_disconnect(self.id, Some(err.into()));
+            return;
+        }
+
+        if wbuf_empty {
+            {
+                let stream = self.inner.borrow_mut();
+                super::poll_reregister(self.id, &*stream, Ready::readable(), PollOpt::edge());
+            }
+            let mut handler = self.handler.borrow_mut();
+            handler.on_write_finished(self.id);
         }
     }
 
@@ -169,7 +209,7 @@ impl Connection {
             }
         }
         if ready.is_writable() {
-            self.do_write(true);
+            self.do_write();
         }
     }
 }

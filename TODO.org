@@ -1,0 +1,7 @@
+* avoid registering for writes
+  Right now we always schedule writes in the evloop, to avoid
+  reentrancy in the connection handler.
+
+  Can we do better? Some ideas:
+  1) Maybe calls to write should "schedule" the write to happen outside the handler?
+  2) What if handler calls were scheduled and executed later?
