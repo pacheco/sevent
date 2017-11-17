@@ -17,17 +17,17 @@ impl sevent::ConnectionHandler for Echo {
 fn main() {
     sevent::run_evloop(|| {
         let addr = "127.0.0.1:10000".parse().unwrap();
-        let id = sevent::add_connect(addr, |res| {
+        let id = sevent::add_connect(addr, |addr, res| {
             match res {
                 Ok(stream) => {
-                    println!("connected!");
+                    println!("connected to {:?}!", addr);
                     let id = sevent::add_connection(stream, Echo).unwrap();
                     sevent::connection_write(id, |wbuf| {
                         wbuf.extend(0..32);
                     });
                 }
                 Err(err) => {
-                    println!("connect error {:?}", err);
+                    println!("error connecting to {:?}: {:?}", addr, err);
                     sevent::shutdown();
                 }
             }

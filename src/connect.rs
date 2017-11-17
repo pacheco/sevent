@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::net::SocketAddr;
 use std::rc::Rc;
 
 use mio::Ready;
@@ -7,21 +8,20 @@ use mio::net::TcpStream;
 use ::Error;
 
 pub trait ConnectHandler {
-    fn on_result(&mut self, result: Result<TcpStream, Error>);
+    fn on_connect_result(self: Box<Self>, addr: SocketAddr, result: Result<TcpStream, Error>);
 }
 
-
-
 impl<F> ConnectHandler for F
-    where F: FnMut(Result<TcpStream, Error>)
+    where F: FnOnce(SocketAddr, Result<TcpStream, Error>)
 {
-    fn on_result(&mut self, result: Result<TcpStream, Error>) {
-        self(result)
+    fn on_connect_result(self: Box<Self>, addr: SocketAddr, result: Result<TcpStream, Error>) {
+        self(addr, result)
     }
 }
 
 pub struct Connect {
     pub id: usize,
+    pub addr: SocketAddr,
     pub inner: RefCell<TcpStream>,
     pub handler: RefCell<Box<ConnectHandler>>,
 }
@@ -32,16 +32,24 @@ impl Connect {
             let res_err = self_rc.inner.borrow().take_error();
             match res_err {
                 Ok(Some(err)) => {
+                    // connect failure
                     super::del(self_rc.id).unwrap();
-                    self_rc.handler.borrow_mut().on_result(Err(err.into()));
+                    match Rc::try_unwrap(self_rc) {
+                        Ok(connect) => {
+                            let handler = connect.handler.into_inner();
+                            handler.on_connect_result(connect.addr, Err(err.into()));
+                        }
+                        Err(_) => panic!("this should be the only RC!"),
+                    }
                 }
                 Ok(None) => {
+                    // connected!
                     super::del(self_rc.id).unwrap();
                     match Rc::try_unwrap(self_rc) {
                         Ok(connect) => {
                             let stream = connect.inner.into_inner();
-                            let mut handler = connect.handler.into_inner();
-                            handler.on_result(Ok(stream));
+                            let handler = connect.handler.into_inner();
+                            handler.on_connect_result(connect.addr, Ok(stream));
                         }
                         Err(_) => panic!("there should be no other rcs!"),
                     }

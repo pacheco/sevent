@@ -205,6 +205,7 @@ pub fn add_connect<H: 'static + ConnectHandler>(addr: SocketAddr, handler: H) ->
         poll_register(id, &stream, Ready::writable(), PollOpt::edge());
         let connect = Connect {
             id,
+            addr: addr,
             inner: RefCell::new(stream),
             handler: RefCell::new(Box::new(handler)),
         };
