@@ -9,7 +9,7 @@ use mio_more::channel;
 struct TimeoutCount(u64);
 
 impl sevent::TimeoutHandler for TimeoutCount {
-    fn timeout(mut self: Box<TimeoutCount>) {
+    fn on_timeout(mut self: Box<TimeoutCount>) {
         if self.0 == 0 {
             println!("count done!");
         } else {

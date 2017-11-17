@@ -124,7 +124,7 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                             loop {
                                 let p = timer.borrow_mut().poll();
                                 if let Some(timeout) = p {
-                                    timeout.timeout();
+                                    timeout.on_timeout();
                                 } else {
                                     break;
                                 }
@@ -263,6 +263,13 @@ pub fn del(id: usize) -> Result<(), Error> {
         } else {
             Err(Error::InvalidId)
         }
+    })
+}
+
+fn poll_deregister<E: Evented>(evented: &E) {
+    POLL.with(|p| {
+        let poll = p.borrow().expect("not inside evloop");
+        poll.deregister(evented).expect("error deregistering from evloop");
     })
 }
 
