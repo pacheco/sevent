@@ -33,12 +33,16 @@ pub use self::chan::ChanHandler;
 mod timer;
 pub use self::timer::TimeoutHandler;
 
+mod tick;
+pub use self::tick::TickHandler;
+
 pub mod ext;
 
 use std::time::Duration;
 use std::net::SocketAddr;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::mem;
 
 use mio::Events;
 use mio::Poll;
@@ -60,6 +64,8 @@ thread_local! {
     static POLL: LazyCell<Poll> = LazyCell::new();
     static SHUTDOWN: RefCell<bool> = RefCell::new(false);
     static SLAB: RefCell<Slab<Context>> = RefCell::new(Slab::new());
+    static ON_CURRENT_TICK: RefCell<Vec<Box<TickHandler>>> = RefCell::new(Vec::new());
+    static ON_NEXT_TICK: RefCell<Vec<Box<TickHandler>>> = RefCell::new(Vec::new());
 }
 
 #[derive(Clone)]
@@ -133,6 +139,22 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                     }
                 });
             }
+            ON_CURRENT_TICK.with(|current| {
+                // run callbacks scheduled for the current tick
+                loop {
+                    // this weirdness is to avoid keeping 'current' borrowed after the pop
+                    let h = { current.borrow_mut().pop() };
+                    if let Some(h) = h {
+                        h.on_tick();
+                    } else {
+                        break;
+                    }
+                }
+                // swap them for the next tick
+                ON_NEXT_TICK.with(|next| {
+                    mem::swap(&mut *current.borrow_mut(), &mut *next.borrow_mut());
+                })
+            });
         }
         Ok(())
     })?;
@@ -145,11 +167,23 @@ pub fn shutdown() {
     })
 }
 
-pub fn set_timeout<H: 'static + TimeoutHandler>(after: Duration, timeout: H) -> Result<mio_timer::Timeout, Error> {
+pub fn on_current_tick<H: 'static + TickHandler>(handler: H) {
+    ON_CURRENT_TICK.with(|current| {
+        current.borrow_mut().push(Box::new(handler));
+    })
+}
+
+pub fn on_next_tick<H: 'static + TickHandler>(handler: H) {
+    ON_NEXT_TICK.with(|next| {
+        next.borrow_mut().push(Box::new(handler));
+    })
+}
+
+pub fn set_timeout<H: 'static + TimeoutHandler>(after: Duration, handler: H) -> Result<mio_timer::Timeout, Error> {
     SLAB.with(|slab| {
         match slab.borrow().get(0).expect("global timer missing").clone() {
             Context::Timer(timer) => {
-                timer.borrow_mut().set_timeout(after, Box::new(timeout)).map_err(|e| e.into())
+                timer.borrow_mut().set_timeout(after, Box::new(handler)).map_err(|e| e.into())
             }
             _ => panic!("global timer missing"),
         }

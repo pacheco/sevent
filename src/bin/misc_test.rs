@@ -31,6 +31,11 @@ fn main() {
     });
 
     sevent::run_evloop(|| {
+        sevent::on_current_tick(|| {
+            println!("end of first tick!");
+            sevent::on_next_tick(|| println!("end of second tick!"));
+            sevent::on_current_tick(|| println!("end of first tick!"));
+        });
         sevent::set_timeout(Duration::from_secs(1), || {
             println!("timed out!");
         }).unwrap();
