@@ -145,11 +145,22 @@ pub fn shutdown() {
     })
 }
 
-pub fn add_timeout<H: 'static + TimeoutHandler>(after: Duration, timeout: H) -> Result<mio_timer::Timeout, Error> {
+pub fn set_timeout<H: 'static + TimeoutHandler>(after: Duration, timeout: H) -> Result<mio_timer::Timeout, Error> {
     SLAB.with(|slab| {
         match slab.borrow().get(0).expect("global timer missing").clone() {
             Context::Timer(timer) => {
                 timer.borrow_mut().set_timeout(after, Box::new(timeout)).map_err(|e| e.into())
+            }
+            _ => panic!("global timer missing"),
+        }
+    })
+}
+
+pub fn cancel_timeout(timeout: &mio_timer::Timeout) -> Option<Box<TimeoutHandler>> {
+    SLAB.with(|slab| {
+        match slab.borrow().get(0).expect("global timer missing").clone() {
+            Context::Timer(timer) => {
+                timer.borrow_mut().cancel_timeout(&timeout)
             }
             _ => panic!("global timer missing"),
         }

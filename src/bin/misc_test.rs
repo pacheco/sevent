@@ -15,7 +15,7 @@ impl evmsg::TimeoutHandler for TimeoutCount {
         } else {
             println!("counting down: {}", self.0);
             self.0 -= 1;
-            evmsg::add_timeout(Duration::from_secs(1), *self).unwrap();
+            evmsg::set_timeout(Duration::from_secs(1), *self).unwrap();
         }
     }
 }
@@ -31,10 +31,10 @@ fn main() {
     });
 
     evmsg::run_evloop(|| {
-        evmsg::add_timeout(Duration::from_secs(1), || {
+        evmsg::set_timeout(Duration::from_secs(1), || {
             println!("timed out!");
         }).unwrap();
-        evmsg::add_timeout(Duration::from_secs(0), TimeoutCount(10)).unwrap();
+        evmsg::set_timeout(Duration::from_secs(0), TimeoutCount(10)).unwrap();
         evmsg::add_chan(rx, |id, recv| {
             if let Some(msg) = recv {
                 println!("got {} from chan {}", msg, id);
