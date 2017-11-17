@@ -81,6 +81,8 @@ pub fn connection_write<F>(id: usize, f: F)
             if was_empty {
                 connection.register_write();
             }
+        } else {
+            panic!("not a valid connection id!");
         }
     })
 }
