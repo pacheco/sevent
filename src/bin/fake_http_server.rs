@@ -1,4 +1,4 @@
-extern crate evmsg;
+extern crate sevent;
 extern crate mio;
 
 use mio::net::TcpListener;
@@ -12,12 +12,12 @@ Hello World\r
 fn main() {
     let addr = "127.0.0.1:10000".parse().unwrap();
 
-    evmsg::run_evloop(|| {
+    sevent::run_evloop(|| {
         let l = TcpListener::bind(&addr)?;
-        evmsg::add_listener(l, |res: Result<_,_>| {
+        sevent::add_listener(l, |res: Result<_,_>| {
             let (stream, addr) = res.unwrap();
 
-            let id = evmsg::add_connection(stream, evmsg::ConnectionHandlerClosures {
+            let id = sevent::add_connection(stream, sevent::ConnectionHandlerClosures {
                 on_read: |_id, buf| {
                     buf.drain(..); // just discard the data on read
                 },
@@ -26,7 +26,7 @@ fn main() {
                 },
                 on_write_finished: |id| {
                     // write to client
-                    evmsg::connection_write(id, |wbuf| {
+                    sevent::connection_write(id, |wbuf| {
                         wbuf.extend_from_slice(RESPONSE.as_bytes());
                     })
                 },
@@ -35,7 +35,7 @@ fn main() {
             println!("client connection {} from {:?}", id, addr);
 
             // write to client
-            evmsg::connection_write(id, |wbuf| {
+            sevent::connection_write(id, |wbuf| {
                 wbuf.extend_from_slice(RESPONSE.as_bytes());
             })
         }).unwrap();

@@ -1,34 +1,34 @@
-extern crate evmsg;
+extern crate sevent;
 
 struct Echo;
 
-impl evmsg::ConnectionHandler for Echo {
+impl sevent::ConnectionHandler for Echo {
     fn on_read(&mut self, id: usize, buf: &mut Vec<u8>) {
-        evmsg::connection_write(id, |wbuf| {
+        sevent::connection_write(id, |wbuf| {
             wbuf.extend(buf.drain(..));
         });
     }
 
-    fn on_disconnect(&mut self, id: usize, err: Option<evmsg::Error>) {
+    fn on_disconnect(&mut self, id: usize, err: Option<sevent::Error>) {
         println!("connection {} disconneted: {:?}", id, err);
     }
 }
 
 fn main() {
-    evmsg::run_evloop(|| {
+    sevent::run_evloop(|| {
         let addr = "127.0.0.1:10000".parse().unwrap();
-        let id = evmsg::add_connect(addr, |res| {
+        let id = sevent::add_connect(addr, |res| {
             match res {
                 Ok(stream) => {
                     println!("connected!");
-                    let id = evmsg::add_connection(stream, Echo).unwrap();
-                    evmsg::connection_write(id, |wbuf| {
+                    let id = sevent::add_connection(stream, Echo).unwrap();
+                    sevent::connection_write(id, |wbuf| {
                         wbuf.extend(0..32);
                     });
                 }
                 Err(err) => {
                     println!("connect error {:?}", err);
-                    evmsg::shutdown();
+                    sevent::shutdown();
                 }
             }
         });

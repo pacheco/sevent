@@ -1,5 +1,5 @@
 [package]
-name = "evmsg"
+name = "sevent"
 version = "0.1.0"
 authors = ["Leandro Pacheco <contact@leandropacheco.com>"]
 

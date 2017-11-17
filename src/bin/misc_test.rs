@@ -1,4 +1,4 @@
-extern crate evmsg;
+extern crate sevent;
 extern crate mio_more;
 
 use std::time::Duration;
@@ -8,14 +8,14 @@ use mio_more::channel;
 
 struct TimeoutCount(u64);
 
-impl evmsg::TimeoutHandler for TimeoutCount {
+impl sevent::TimeoutHandler for TimeoutCount {
     fn timeout(mut self: Box<TimeoutCount>) {
         if self.0 == 0 {
             println!("count done!");
         } else {
             println!("counting down: {}", self.0);
             self.0 -= 1;
-            evmsg::set_timeout(Duration::from_secs(1), *self).unwrap();
+            sevent::set_timeout(Duration::from_secs(1), *self).unwrap();
         }
     }
 }
@@ -30,12 +30,12 @@ fn main() {
         }
     });
 
-    evmsg::run_evloop(|| {
-        evmsg::set_timeout(Duration::from_secs(1), || {
+    sevent::run_evloop(|| {
+        sevent::set_timeout(Duration::from_secs(1), || {
             println!("timed out!");
         }).unwrap();
-        evmsg::set_timeout(Duration::from_secs(0), TimeoutCount(10)).unwrap();
-        evmsg::add_chan(rx, |id, recv| {
+        sevent::set_timeout(Duration::from_secs(0), TimeoutCount(10)).unwrap();
+        sevent::add_chan(rx, |id, recv| {
             if let Some(msg) = recv {
                 println!("got {} from chan {}", msg, id);
             }
