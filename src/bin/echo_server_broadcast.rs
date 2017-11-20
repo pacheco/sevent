@@ -1,6 +1,8 @@
 extern crate sevent;
 extern crate mio;
 
+use mio::net::TcpStream;
+
 use std::time::SystemTime;
 use std::rc::Rc;
 use std::cell::RefCell;
@@ -39,9 +41,10 @@ fn main() {
 
         let listener = mio::net::TcpListener::bind(&addr).unwrap();
 
-        let id = sevent::add_listener(listener, move |res| {
+        let id = sevent::add_listener(listener, move |res: Result<(TcpStream, _),_>| {
             match res {
                 Ok((stream, addr)) => {
+                    stream.set_nodelay(true).unwrap();
                     let id = sevent::add_connection(stream, Echo {
                         connections: connections.clone(),
                     }).unwrap();

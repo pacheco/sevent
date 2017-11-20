@@ -1,6 +1,8 @@
 extern crate sevent;
 extern crate mio;
 
+use mio::net::TcpStream;
+
 struct Echo;
 
 impl sevent::ConnectionHandler for Echo {
@@ -19,9 +21,10 @@ fn main() {
     sevent::run_evloop(|| {
         let addr = "127.0.0.1:10000".parse().unwrap();
         let listener = mio::net::TcpListener::bind(&addr).unwrap();
-        let id = sevent::add_listener(listener, |res| {
+        let id = sevent::add_listener(listener, |res: Result<(TcpStream, _),_>| {
             match res {
                 Ok((stream, addr)) => {
+                    stream.set_nodelay(true).unwrap();
                     let id = sevent::add_connection(stream, Echo).unwrap();
                     println!("new connection {} from {:?}", id, addr);
                 }
