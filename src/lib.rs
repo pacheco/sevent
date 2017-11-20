@@ -64,6 +64,7 @@ use slab::Slab;
 use lazycell::LazyCell;
 
 const TOKEN_KIND_BITS: usize = 3;
+const TOKEN_KIND_MASK: usize = 0b111;
 
 struct LoopCtx {
     poll: Poll,
@@ -407,11 +408,11 @@ trait TokenExt {
 
 impl TokenExt for Token {
     fn to_id_kind(&self) -> (usize, TokenKind) {
-        let id: usize = (*self).into();
-        let kind_id = (id & 0xff) as u8;
+        let kind_id = (self.0 & TOKEN_KIND_MASK) as u8;
         let kind = unsafe { mem::transmute(kind_id) };
-        (id >> TOKEN_KIND_BITS, kind)
+        (self.0 >> TOKEN_KIND_BITS, kind)
     }
+
     fn from_id_kind(id: usize, kind: TokenKind) -> Self {
         Token((id << TOKEN_KIND_BITS) | (kind as usize))
     }
@@ -422,10 +423,13 @@ mod tests {
     use super::*;
     #[test]
     fn enum_to_int() {
-        use self::TokenKind::*;
-        for kind in vec![Listener, Stream, Connect, Chan, Timer] {
-            let (id, kind) = (0, kind);
-            assert_eq!((id, kind), Token::from_id_kind(0, kind).to_id_kind());
+        for kind in vec![TokenKind::Listener,
+                         TokenKind::Connection,
+                         TokenKind::Connect,
+                         TokenKind::Chan,
+                         TokenKind::Timer] {
+            assert_eq!((0, kind), Token::from_id_kind(0, kind).to_id_kind());
+            assert_eq!((123, kind), Token::from_id_kind(123, kind).to_id_kind());
         }
     }
 }
