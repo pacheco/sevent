@@ -10,7 +10,7 @@ impl sevent::ConnectionHandler for Echo {
             for msg in msgs {
                 wbuf.put_frame_bincode(&msg.unwrap()).unwrap();
             }
-        });
+        }).unwrap();
     }
 
     fn on_disconnect(&mut self, id: usize, err: Option<sevent::Error>) {
@@ -28,7 +28,7 @@ fn main() {
                     let id = sevent::add_connection(stream, Echo).unwrap();
                     sevent::connection_write(id, |wbuf| {
                         wbuf.put_frame_bincode(&"hey joe!".to_string()).unwrap();
-                    });
+                    }).unwrap();
                 }
                 Err(err) => {
                     println!("connect error {:?}", err);

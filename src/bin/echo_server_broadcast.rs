@@ -20,7 +20,7 @@ impl sevent::ConnectionHandler for Echo {
             for id in connections.iter() {
                 sevent::connection_write(*id, |wbuf| {
                     wbuf.put_frame_bincode(&msg).unwrap();
-                });
+                }).unwrap();
             }
         }
     }

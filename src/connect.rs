@@ -5,6 +5,7 @@ use std::rc::Rc;
 use mio::Ready;
 use mio::net::TcpStream;
 
+use ::TokenKind;
 use ::Error;
 
 pub trait ConnectHandler {
@@ -33,7 +34,7 @@ impl Connect {
             match res_err {
                 Ok(Some(err)) => {
                     // connect failure
-                    super::del(self_rc.id).unwrap();
+                    super::del(self_rc.id, TokenKind::Connect).unwrap();
                     match Rc::try_unwrap(self_rc) {
                         Ok(connect) => {
                             let handler = connect.handler.into_inner();
@@ -44,7 +45,7 @@ impl Connect {
                 }
                 Ok(None) => {
                     // connected!
-                    super::del(self_rc.id).unwrap();
+                    super::del(self_rc.id, TokenKind::Connect).unwrap();
                     match Rc::try_unwrap(self_rc) {
                         Ok(connect) => {
                             let stream = connect.inner.into_inner();

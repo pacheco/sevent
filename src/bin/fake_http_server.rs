@@ -28,7 +28,7 @@ fn main() {
                     // write to client
                     sevent::connection_write(id, |wbuf| {
                         wbuf.extend_from_slice(RESPONSE.as_bytes());
-                    })
+                    }).unwrap()
                 },
             }).unwrap();
 
@@ -37,7 +37,7 @@ fn main() {
             // write to client
             sevent::connection_write(id, |wbuf| {
                 wbuf.extend_from_slice(RESPONSE.as_bytes());
-            })
+            }).unwrap()
         }).unwrap();
         Ok(())
     }).unwrap();

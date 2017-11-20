@@ -7,6 +7,8 @@ use mio::Poll;
 
 use mio_more::channel;
 
+use ::TokenKind;
+
 // we need the trait because we want to be able to store channels of any T.
 pub trait Chan {
     fn id(&self) -> usize;
@@ -46,7 +48,7 @@ impl<T> Chan for ChanCtx<T> {
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.handler.borrow_mut().on_close(self.id);
-                    super::del(self.id).unwrap();
+                    super::del(self.id, TokenKind::Chan).unwrap();
                     break;
                 }
             }

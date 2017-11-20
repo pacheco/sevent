@@ -6,6 +6,7 @@ use mio::Ready;
 use mio::net::TcpListener;
 use mio::net::TcpStream;
 
+use ::TokenKind;
 use ::Error;
 
 pub struct Listener {
@@ -34,7 +35,7 @@ impl Listener {
                     Err(err) => {
                         error!("listener {} accept error: {:?}", self.id, err);
                         self.handler.borrow_mut().on_accept(Err(err.into()));
-                        super::del(self.id).unwrap();
+                        super::del(self.id, TokenKind::Listener).unwrap();
                     }
                 }
             }

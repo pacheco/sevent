@@ -40,7 +40,7 @@ impl sevent::ConnectionHandler for Echo {
                     let msg: (u64, _) = (rand::random(), SystemTime::now());
                     pending.insert(msg.0);
                     wbuf.put_frame_bincode(&msg).unwrap();
-                });
+                }).unwrap();
             }
         }
     }
@@ -104,7 +104,7 @@ fn main() {
         sevent::add_connect(addr, move |addr, res: Result<TcpStream, _>| {
             match res {
                 Ok(stream) => {
-                    stream.set_nodelay(true);
+                    stream.set_nodelay(true).unwrap();
                     println!("connected to {:?}!", addr);
                     let conn_id = sevent::add_connection(stream, echo).unwrap();
                     for _ in 0..outstanding {
@@ -113,7 +113,7 @@ fn main() {
                             let msg = (id, SystemTime::now());
                             pending.borrow_mut().insert(id);
                             wbuf.put_frame_bincode(&msg).unwrap();
-                        })
+                        }).unwrap();
                     }
                 }
                 Err(err) => {

@@ -6,7 +6,7 @@ impl sevent::ConnectionHandler for Echo {
     fn on_read(&mut self, id: usize, buf: &mut Vec<u8>) {
         sevent::connection_write(id, |wbuf| {
             wbuf.extend(buf.drain(..));
-        });
+        }).unwrap();
     }
 
     fn on_disconnect(&mut self, id: usize, err: Option<sevent::Error>) {
@@ -24,7 +24,7 @@ fn main() {
                     let id = sevent::add_connection(stream, Echo).unwrap();
                     sevent::connection_write(id, |wbuf| {
                         wbuf.extend(0..32);
-                    });
+                    }).unwrap();
                 }
                 Err(err) => {
                     println!("error connecting to {:?}: {:?}", addr, err);

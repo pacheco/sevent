@@ -12,6 +12,7 @@ impl sevent::TimeoutHandler for TimeoutCount {
     fn on_timeout(mut self: Box<TimeoutCount>) {
         if self.0 == 0 {
             println!("count done!");
+            sevent::shutdown();
         } else {
             println!("counting down: {}", self.0);
             self.0 -= 1;

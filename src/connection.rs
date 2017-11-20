@@ -2,12 +2,12 @@ use std::cell::RefCell;
 use std::io::ErrorKind::WouldBlock;
 use std::io::Read;
 use std::io::Write;
-use std::io;
+use std::rc::Rc;
 
 use mio::Ready;
-use mio::PollOpt;
 use mio::net::TcpStream;
 
+use ::TokenKind;
 use ::Error;
 
 const READ_SIZE: usize = 8*1024;
@@ -61,40 +61,39 @@ impl<R, D, W> ConnectionHandler for ConnectionHandlerClosures<R,D,W>
 pub struct Connection {
     pub id: usize,
     pub inner: RefCell<TcpStream>,
+    pub ready: RefCell<Ready>,
+    pub rbuf: RefCell<Vec<u8>>,
+    pub wbuf: RefCell<Vec<u8>>,
     handler: RefCell<Box<ConnectionHandler>>,
-    rbuf: RefCell<Vec<u8>>,
-    wbuf: RefCell<Vec<u8>>,
 }
 
-pub fn connection_write<F>(id: usize, f: F)
+pub fn connection_write<F>(id: usize, f: F) -> Result<(), Error>
     where F: FnOnce(&mut Vec<u8>)
 {
-    super::SLAB.with(|slab| {
-        let slab = slab.borrow();
-        if let Some(&super::Context::Connection(ref connection)) = slab.get(id) {
-            let was_empty;
-            {
-                let mut wbuf = connection.wbuf.borrow_mut();
-                was_empty = wbuf.is_empty();
-                f(&mut wbuf);
+    super::CTX.with(|ctx| {
+        let ctx = ctx.borrow().expect("not inside evloop");
+        match ctx.conns.borrow().get(id) {
+            Some(conn) => {
+                let was_writable = conn.is_writable();
+                f(&mut conn.wbuf.borrow_mut());
+                if conn.is_writable() && !was_writable {
+                    ctx.conns_writable.borrow_mut().push_back(Rc::downgrade(conn));
+                }
+                Ok(())
             }
-            if was_empty {
-                connection.register_write();
-            }
-        } else {
-            panic!("not a valid connection id!");
+            None => Err(Error::InvalidId),
         }
     })
 }
 
 impl Connection {
-    pub fn new_registered<H>(id: usize, stream: TcpStream, handler: H)
+    pub fn new<H>(id: usize, stream: TcpStream, handler: H)
                              -> Result<Self, Error>
         where H: 'static + ConnectionHandler,
     {
-        super::poll_register(id, &stream, Ready::readable(), PollOpt::edge());
         let conn = Connection {
             id,
+            ready: RefCell::new(Ready::writable()),
             rbuf: RefCell::new(Vec::with_capacity(READ_SIZE)),
             wbuf: RefCell::new(Vec::with_capacity(0)),
             inner: RefCell::new(stream),
@@ -103,115 +102,100 @@ impl Connection {
         Ok(conn)
     }
 
-    fn register_write(&self) {
-        let stream = self.inner.borrow();
-        super::poll_reregister(self.id, &*stream, Ready::readable() | Ready::writable(), PollOpt::edge());
+    pub fn is_writable(&self) -> bool {
+        self.ready.borrow().is_writable() && !self.wbuf.borrow().is_empty()
     }
 
-    fn do_write(&self) {
+    pub fn is_readable(&self) -> bool {
+        self.ready.borrow().is_readable()
+    }
+
+    // Tries to write some data.
+    // Returns true if the connection is still ready for another
+    // write, i.e.,: no errors, has data to be written and would not block
+    pub fn do_write(&self) -> bool {
+        assert!(!self.wbuf.borrow().is_empty());
         let wbuf_empty;
         let mut write_err = None;
         {
             let mut stream = self.inner.borrow_mut();
             let mut wbuf = self.wbuf.borrow_mut();
-            while !wbuf.is_empty() {
-                match stream.write(&wbuf[..]) {
-                    Ok(n) => {
-                        wbuf.drain(..n);
-                    }
-                    Err(ref err) if err.kind() == WouldBlock => {
-                        break;
-                    }
-                    Err(err) => {
-                        error!("connection {}: {:?}", self.id, err);
-                        write_err = Some(err);
-                        break;
-                    }
-                }
+            match stream.write(&wbuf[..]) {
+                Ok(n) => { wbuf.drain(..n); }
+                Err(err) => write_err = Some(err),
             }
             wbuf_empty = wbuf.is_empty();
         }
 
         if let Some(err) = write_err {
-            super::del(self.id).unwrap();
-            let mut handler = self.handler.borrow_mut();
-            handler.on_disconnect(self.id, Some(err.into()));
-            return;
+            if err.kind() == WouldBlock {
+                self.ready.borrow_mut().remove(Ready::writable());
+                return false;
+            } else {
+                error!("connection {}: {:?}", self.id, err);
+                super::del(self.id, TokenKind::Connection).unwrap();
+                let mut handler = self.handler.borrow_mut();
+                handler.on_disconnect(self.id, Some(err.into()));
+                return false;
+            }
         }
 
         if wbuf_empty {
-            {
-                let stream = self.inner.borrow_mut();
-                super::poll_reregister(self.id, &*stream, Ready::readable(), PollOpt::edge());
-            }
             let mut handler = self.handler.borrow_mut();
             handler.on_write_finished(self.id);
+            return false;
+        } else {
+            return true;
         }
     }
 
-    pub fn do_read(&self) -> Result<Option<usize>, io::Error> {
-        let mut total_read = 0;
-        {
-            let mut rbuf = self.rbuf.borrow_mut();
+    // Tries to read some data.  Returns true if the connection is
+    // still ready for another read, i.e.,: no errors and would not
+    // block.
+    pub fn do_read(&self) -> bool {
+        let orig_len;
+        let mut rbuf = self.rbuf.borrow_mut();
+        match {
             let mut stream = self.inner.borrow_mut();
-            loop {
-                rbuf.reserve(READ_SIZE);
-                let orig_len = rbuf.len();
-                unsafe { rbuf.set_len(orig_len + READ_SIZE) };
-                match stream.read(&mut rbuf[orig_len..]) {
-                    Ok(0) => {
-                        error!("connection {}: remote side closed write", self.id);
-                        unsafe { rbuf.set_len(orig_len) };
-                        if total_read == 0 {
-                            // remote side closed and we did not read anything
-                            return Ok(None);
-                        }
-                        return Ok(Some(total_read));
-                    }
-                    Ok(n) => {
-                        unsafe { rbuf.set_len(orig_len + n) };
-                        total_read += n;
-                    }
-                    Err(ref err) if err.kind() == WouldBlock => {
-                        unsafe { rbuf.set_len(orig_len) };
-                        return Ok(Some(total_read));
-                    }
-                    Err(err) => {
-                        error!("connection {}: {:?}", self.id, err);
-                        unsafe { rbuf.set_len(orig_len) };
-                        return Err(err);
-                    }
-                }
+            rbuf.reserve(READ_SIZE);
+            orig_len = rbuf.len();
+            unsafe { rbuf.set_len(orig_len + READ_SIZE) };
+            stream.read(&mut rbuf[orig_len..])
+        } {
+            Ok(0) => {
+                // remote side closed
+                error!("connection {}: remote closed for writing", self.id);
+                unsafe { rbuf.set_len(orig_len) };
+                // TODO: should we handle partial close?
+                super::del(self.id, TokenKind::Connection).unwrap();
+                let mut handler = self.handler.borrow_mut();
+                handler.on_disconnect(self.id, None);
+                return false;
+            }
+            Ok(n) => {
+                unsafe { rbuf.set_len(orig_len + n) };
+                // we read something
+                let mut handler = self.handler.borrow_mut();
+                handler.on_read(self.id, &mut rbuf);
+                return true;
+            }
+            Err(ref err) if err.kind() == WouldBlock => {
+                unsafe { rbuf.set_len(orig_len) };
+                self.ready.borrow_mut().remove(Ready::readable());
+                return false;
+            }
+            Err(err) => {
+                error!("connection {}: {:?}", self.id, err);
+                unsafe { rbuf.set_len(orig_len) };
+                super::del(self.id, TokenKind::Connection).unwrap();
+                let mut handler = self.handler.borrow_mut();
+                handler.on_disconnect(self.id, Some(err.into()));
+                return false;
             }
         }
     }
 
     pub fn ready(&self, ready: Ready) {
-        if ready.is_readable() {
-            match self.do_read() {
-                Ok(None) => {
-                    // remote side closed write and we didn't read anything
-                    super::del(self.id).unwrap();
-                    let mut handler = self.handler.borrow_mut();
-                    handler.on_disconnect(self.id, None);
-                    return;
-                }
-                Ok(Some(0)) => (), // we didn't read anything this time
-                Ok(Some(_n)) => {
-                    // we did read something
-                    let mut handler = self.handler.borrow_mut();
-                    handler.on_read(self.id, &mut self.rbuf.borrow_mut());
-                }
-                Err(err) => {
-                    super::del(self.id).unwrap();
-                    let mut handler = self.handler.borrow_mut();
-                    handler.on_disconnect(self.id, Some(err.into()));
-                    return;
-                }
-            }
-        }
-        if ready.is_writable() {
-            self.do_write();
-        }
+        self.ready.borrow_mut().insert(ready);
     }
 }

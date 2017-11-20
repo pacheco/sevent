@@ -42,7 +42,10 @@ use std::time::Duration;
 use std::net::SocketAddr;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::rc::Weak;
+use std::collections::VecDeque;
 use std::mem;
+use std::io;
 
 use mio::Events;
 use mio::Poll;
@@ -60,191 +63,245 @@ use slab::Slab;
 
 use lazycell::LazyCell;
 
+const TOKEN_KIND_BITS: usize = 3;
+
+struct LoopCtx {
+    poll: Poll,
+    shutdown: RefCell<bool>,
+    listeners: RefCell<Slab<Rc<Listener>>>,
+    connects: RefCell<Slab<Rc<Connect>>>,
+    timer: RefCell<mio_timer::Timer<Box<TimeoutHandler>>>,
+    chans: RefCell<Slab<Rc<Chan>>>,
+    conns: RefCell<Slab<Rc<Connection>>>,
+    conns_readable: RefCell<VecDeque<Weak<Connection>>>,
+    conns_writable: RefCell<VecDeque<Weak<Connection>>>,
+    on_current_tick: RefCell<VecDeque<Box<TickHandler>>>,
+    on_next_tick: RefCell<VecDeque<Box<TickHandler>>>,
+}
+
 thread_local! {
-    static POLL: LazyCell<Poll> = LazyCell::new();
-    static SHUTDOWN: RefCell<bool> = RefCell::new(false);
-    static SLAB: RefCell<Slab<Context>> = RefCell::new(Slab::new());
-    static ON_CURRENT_TICK: RefCell<Vec<Box<TickHandler>>> = RefCell::new(Vec::new());
-    static ON_NEXT_TICK: RefCell<Vec<Box<TickHandler>>> = RefCell::new(Vec::new());
+    static CTX: LazyCell<LoopCtx> = LazyCell::new();
 }
 
 #[derive(Clone)]
 pub enum Context {
-    Connection(Rc<Connection>),
-    Connect(Rc<Connect>),
-    Listener(Rc<Listener>),
-    Chan(Rc<Chan>),
-    Timer(Rc<RefCell<mio_timer::Timer<Box<TimeoutHandler>>>>),
+    // Connection(Rc<Connection>),
+    // Connect(Rc<Connect>),
+    // Listener(Rc<Listener>),
+    // Chan(Rc<Chan>),
+    // Timer(Rc<RefCell<mio_timer::Timer<Box<TimeoutHandler>>>>),
 }
 
 pub fn run_evloop<F>(init: F) -> Result<(), Error>
     where F: FnOnce() -> Result<(), Error>
 {
-    POLL.with(|p| -> Result<(), Error> {
-        let poll = Poll::new()?;
-        let poll = p.borrow_with(|| poll);
-
-        // register the timer
-        SLAB.with(|slab| {
-            let mut slab = slab.borrow_mut();
-            let e = slab.vacant_entry();
-            let id = e.key();
-            assert!(id == 0); // timer is always id 0
-            let t = mio_timer::Timer::default();
-            poll_register(id, &t, Ready::readable(), PollOpt::edge());
-            e.insert(Context::Timer(Rc::new(RefCell::new(t))));
+    CTX.with(|ctx| -> Result<(), Error> {
+        // create the LoopCtx
+        let ctx = ctx.borrow_with(|| {
+            LoopCtx {
+                poll: Poll::new().expect("could not create event poll"),
+                shutdown: RefCell::new(false),
+                listeners: RefCell::new(Slab::new()),
+                connects: RefCell::new(Slab::new()),
+                timer: RefCell::new(mio_timer::Timer::default()),
+                chans: RefCell::new(Slab::new()),
+                conns: RefCell::new(Slab::new()),
+                conns_readable: RefCell::new(VecDeque::new()),
+                conns_writable: RefCell::new(VecDeque::new()),
+                on_current_tick: RefCell::new(VecDeque::new()),
+                on_next_tick: RefCell::new(VecDeque::new()),
+            }
         });
 
-        // call the user init
+        // register timer
+        poll_register(0, TokenKind::Timer, &*ctx.timer.borrow(), Ready::readable(), PollOpt::edge());
+
+        // user initialization
         init()?;
 
-        // evloop until shutdown
         let mut events = Events::with_capacity(1024);
-        loop {
-            let shutdown = SHUTDOWN.with(|s| *s.borrow());
-            if shutdown { break; }
-            poll.poll(&mut events, None)?;
-
-            for event in events.iter() {
-                let id: usize = event.token().into();
-                debug!("events for {}: {:?}", id, event.readiness());
-                SLAB.with(|slab| {
-                    let ctx = {
-                        let slab = slab.borrow();
-                        slab.get(id).expect("invalid event id").clone()
-                    };
-                    match ctx {
-                        Context::Connect(connect) => {
-                            Connect::ready(connect, event.readiness());
-                        }
-                        Context::Connection(connection) => {
-                            connection.ready(event.readiness());
-                        }
-                        Context::Listener(listener) => {
-                            listener.ready(event.readiness());
-                        }
-                        Context::Chan(chan) => {
-                            chan.ready(event.readiness());
-                        }
-                        Context::Timer(timer) => {
-                            loop {
-                                let p = timer.borrow_mut().poll();
-                                if let Some(timeout) = p {
-                                    timeout.on_timeout();
-                                } else {
-                                    break;
-                                }
+        while !*ctx.shutdown.borrow() {
+            match ctx.poll.poll(&mut events, None) {
+                Ok(_) => (),
+                Err(ref err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(Error::from(err)),
+            }
+            for event in &events {
+                match event.token().to_id_kind() {
+                    (id, TokenKind::Listener) => {
+                        let listener = {
+                            ctx.listeners.borrow().get(id).cloned().expect("invalid token")
+                        };
+                        listener.ready(event.readiness());
+                    }
+                    (id, TokenKind::Connect) => {
+                        let connect = {
+                            ctx.connects.borrow().get(id).cloned().expect("invalid token")
+                        };
+                        Connect::ready(connect, event.readiness());
+                    }
+                    (id, TokenKind::Chan) => {
+                        let chan = {
+                            ctx.chans.borrow().get(id).cloned().expect("invalid token")
+                        };
+                        chan.ready(event.readiness());
+                    }
+                    (_id, TokenKind::Timer) => {
+                        loop {
+                            let tev = { ctx.timer.borrow_mut().poll() };
+                            if let Some(timeout) = tev {
+                                timeout.on_timeout();
+                            } else {
+                                break;
                             }
                         }
                     }
-                });
+                    (id, TokenKind::Connection) => {
+                        let conn = {
+                            ctx.conns.borrow().get(id).cloned().expect("invalid token")
+                        };
+                        // place connections with work to be done in the read/write queues
+                        conn.ready(event.readiness());
+                        if conn.is_readable() {
+                            ctx.conns_readable.borrow_mut().push_back(Rc::downgrade(&conn));
+                        }
+                        if conn.is_writable() {
+                            ctx.conns_writable.borrow_mut().push_back(Rc::downgrade(&conn));
+                        }
+                    }
+                }
             }
-            ON_CURRENT_TICK.with(|current| {
-                // run callbacks scheduled for the current tick
+            // reading, writing and ticks may trigger a handler, which
+            // may add another write/tick, so we loop here until
+            // there's nothing to do
+            while {
+                !(ctx.conns_readable.borrow().is_empty()
+                  && ctx.on_current_tick.borrow().is_empty()
+                  && ctx.conns_writable.borrow().is_empty())
+            } {
+                // The weird structure of the loops here is because
+                // the borrow checker is too conservative
+
+                // handle reads
                 loop {
-                    // this weirdness is to avoid keeping 'current' borrowed after the pop
-                    let h = { current.borrow_mut().pop() };
-                    if let Some(h) = h {
-                        h.on_tick();
+                    let wconn = { ctx.conns_readable.borrow_mut().pop_front() };
+                    if let Some(conn) = wconn.and_then(|wconn| wconn.upgrade()) {
+                        if conn.do_read() {
+                            ctx.conns_readable.borrow_mut().push_back(Rc::downgrade(&conn));
+                        }
                     } else {
                         break;
                     }
                 }
-                // swap them for the next tick
-                ON_NEXT_TICK.with(|next| {
-                    mem::swap(&mut *current.borrow_mut(), &mut *next.borrow_mut());
-                })
-            });
+                // handle writes
+                loop {
+                    let wconn = { ctx.conns_writable.borrow_mut().pop_front() };
+                    if let Some(conn) = wconn.and_then(|wconn| wconn.upgrade()) {
+                        if conn.do_write() {
+                            ctx.conns_writable.borrow_mut().push_back(Rc::downgrade(&conn));
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                // handle current tick events
+                loop {
+                    let ev = { ctx.on_current_tick.borrow_mut().pop_front() };
+                    if let Some(ev) = ev {
+                        ev.on_tick();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            // swap current/next tick events for the next loop
+            mem::swap(&mut *ctx.on_current_tick.borrow_mut(), &mut *ctx.on_next_tick.borrow_mut());
         }
         Ok(())
-    })?;
-    Ok(())
+    })
 }
 
 pub fn shutdown() {
-    SHUTDOWN.with(|s| {
-        *s.borrow_mut() = true;
+    CTX.with(|ctx| {
+        let ctx = ctx.borrow().expect("not inside evloop");
+        *ctx.shutdown.borrow_mut() = true;
     })
 }
 
 pub fn on_current_tick<H: 'static + TickHandler>(handler: H) {
-    ON_CURRENT_TICK.with(|current| {
-        current.borrow_mut().push(Box::new(handler));
+    CTX.with(|ctx| {
+        let ctx = ctx.borrow().expect("not inside evloop");
+        ctx.on_current_tick.borrow_mut().push_back(Box::new(handler));
     })
 }
 
 pub fn on_next_tick<H: 'static + TickHandler>(handler: H) {
-    ON_NEXT_TICK.with(|next| {
-        next.borrow_mut().push(Box::new(handler));
+    CTX.with(|ctx| {
+        let ctx = ctx.borrow().expect("not inside evloop");
+        ctx.on_next_tick.borrow_mut().push_back(Box::new(handler));
     })
 }
 
 pub fn set_timeout<H: 'static + TimeoutHandler>(after: Duration, handler: H) -> Result<mio_timer::Timeout, Error> {
-    SLAB.with(|slab| {
-        match slab.borrow().get(0).expect("global timer missing").clone() {
-            Context::Timer(timer) => {
-                timer.borrow_mut().set_timeout(after, Box::new(handler)).map_err(|e| e.into())
-            }
-            _ => panic!("global timer missing"),
-        }
+    CTX.with(|ctx| {
+        let ctx = ctx.borrow().expect("not inside evloop");
+        ctx.timer.borrow_mut().set_timeout(after, Box::new(handler)).map_err(|e| e.into())
     })
 }
 
 pub fn cancel_timeout(timeout: &mio_timer::Timeout) -> Option<Box<TimeoutHandler>> {
-    SLAB.with(|slab| {
-        match slab.borrow().get(0).expect("global timer missing").clone() {
-            Context::Timer(timer) => {
-                timer.borrow_mut().cancel_timeout(&timeout)
-            }
-            _ => panic!("global timer missing"),
-        }
+    CTX.with(|ctx| {
+        let ctx = ctx.borrow().expect("not inside evloop");
+        ctx.timer.borrow_mut().cancel_timeout(&timeout)
     })
 }
 
 pub fn add_listener<H: 'static + AcceptHandler>(listener: TcpListener, handler: H) -> Result<usize, Error> {
-    SLAB.with(|slab| {
-        let mut slab = slab.borrow_mut();
+    CTX.with(|ctx| {
+        let ctx = ctx.borrow().expect("not inside evloop");
+        let mut slab = ctx.listeners.borrow_mut();
         let e = slab.vacant_entry();
         let id = e.key();
-        poll_register(id, &listener, Ready::readable(), PollOpt::edge());
+        poll_register(id, TokenKind::Listener, &listener, Ready::readable(), PollOpt::edge());
         let listener = Listener {
             id,
             inner: RefCell::new(listener),
             handler: RefCell::new(Box::new(handler)),
         };
-        let ctx = Context::Listener(Rc::new(listener));
-        e.insert(ctx);
+        e.insert(Rc::new(listener));
         Ok(id)
     })
 }
 
 pub fn add_connection<H: 'static + ConnectionHandler>(stream: TcpStream, handler: H) -> Result<usize, Error> {
-    SLAB.with(|slab| {
-        let mut slab = slab.borrow_mut();
+    CTX.with(|ctx| {
+        let ctx = ctx.borrow().expect("not inside evloop");
+        let mut slab = ctx.conns.borrow_mut();
         let e = slab.vacant_entry();
         let id = e.key();
-        let conn = Connection::new_registered(id, stream, handler)?;
-        let ctx = Context::Connection(Rc::new(conn));
-        e.insert(ctx);
+        poll_register(id, TokenKind::Connection, &stream,
+                      Ready::readable() | Ready::writable(), PollOpt::edge());
+        let conn = Connection::new(id, stream, handler)?;
+        e.insert(Rc::new(conn));
         Ok(id)
     })
 }
 
 pub fn add_connect<H: 'static + ConnectHandler>(addr: SocketAddr, handler: H) -> Result<usize, Error> {
-    SLAB.with(|slab| {
-        let mut slab = slab.borrow_mut();
+    CTX.with(|ctx| {
+        let ctx = ctx.borrow().expect("not inside evloop");
+        let mut slab = ctx.connects.borrow_mut();
         let e = slab.vacant_entry();
         let id = e.key();
         let stream = TcpStream::connect(&addr)?;
-        poll_register(id, &stream, Ready::writable(), PollOpt::edge());
+        poll_register(id, TokenKind::Connect, &stream, Ready::writable(), PollOpt::edge());
         let connect = Connect {
             id,
             addr: addr,
             inner: RefCell::new(stream),
             handler: RefCell::new(Box::new(handler)),
         };
-        let ctx = Context::Connect(Rc::new(connect));
-        e.insert(ctx);
+        e.insert(Rc::new(connect));
         Ok(id)
     })
 }
@@ -253,70 +310,123 @@ pub fn add_chan<H, T>(chan: channel::Receiver<T>, handler: H) -> Result<usize, E
     where T: 'static,
           H: 'static + ChanHandler<T>
 {
-    SLAB.with(|slab| {
-        let mut slab = slab.borrow_mut();
+    CTX.with(|ctx| {
+        let ctx = ctx.borrow().expect("not inside evloop");
+        let mut slab = ctx.chans.borrow_mut();
         let e = slab.vacant_entry();
         let id = e.key();
-        poll_register(id, &chan, Ready::readable(), PollOpt::edge());
+        poll_register(id, TokenKind::Chan, &chan, Ready::readable(), PollOpt::edge());
         let chan = ChanCtx {
             id,
             inner: RefCell::new(chan),
             handler: RefCell::new(Box::new(handler)),
         };
-        let ctx = Context::Chan(Rc::new(chan));
-        e.insert(ctx);
+        e.insert(Rc::new(chan));
         Ok(id)
     })
 }
 
-pub fn del(id: usize) -> Result<(), Error> {
-    SLAB.with(|slab| {
-        let mut slab = slab.borrow_mut();
-        if slab.contains(id) {
-            POLL.with(|p| {
-                let poll = p.borrow().expect("not inside evloop");
-                match slab.remove(id) {
-                    Context::Connect(connect) => {
-                        poll.deregister(&*connect.inner.borrow()).expect("error deregistering");
-                    }
-                    Context::Connection(connection) => {
-                        poll.deregister(&*connection.inner.borrow()).expect("error deregistering");
-                    }
-                    Context::Listener(listener) => {
-                        poll.deregister(&*listener.inner.borrow()).expect("error deregistering");
-                    }
-                    Context::Chan(chan) => {
-                        chan.deregister(&poll).expect("error deregistering");
-                    }
-                    Context::Timer(_) => {
-                        panic!("cannot remove the global timer");
-                    }
+pub fn del(id: usize, kind: TokenKind) -> Result<(), Error> {
+    CTX.with(|ctx| {
+        let ctx = ctx.borrow().expect("not inside evloop");
+        match kind {
+            TokenKind::Chan => {
+                let mut slab = ctx.chans.borrow_mut();
+                if slab.contains(id) {
+                    slab.remove(id).deregister(&ctx.poll).expect("error deregistering");
+                    Ok(())
+                } else {
+                    Err(Error::InvalidId)
                 }
-            });
-            Ok(())
-        } else {
-            Err(Error::InvalidId)
+            }
+            TokenKind::Connect => {
+                let mut slab = ctx.connects.borrow_mut();
+                if slab.contains(id) {
+                    let connect = slab.remove(id);
+                    poll_deregister(&*connect.inner.borrow());
+                    Ok(())
+                } else {
+                    Err(Error::InvalidId)
+                }
+            }
+            TokenKind::Connection => {
+                let mut slab = ctx.conns.borrow_mut();
+                if slab.contains(id) {
+                    let connection = slab.remove(id);
+                    poll_deregister(&*connection.inner.borrow());
+                    Ok(())
+                } else {
+                    Err(Error::InvalidId)
+                }
+            }
+            TokenKind::Listener => {
+                let mut slab = ctx.listeners.borrow_mut();
+                if slab.contains(id) {
+                    let listener = slab.remove(id);
+                    poll_deregister(&*listener.inner.borrow());
+                    Ok(())
+                } else {
+                    Err(Error::InvalidId)
+                }
+            }
+            TokenKind::Timer => {
+                panic!("cannot delete global timer");
+            }
         }
     })
 }
 
 fn poll_deregister<E: Evented>(evented: &E) {
-    POLL.with(|p| {
-        let poll = p.borrow().expect("not inside evloop");
-        poll.deregister(evented).expect("error deregistering from evloop");
+    CTX.with(|ctx| {
+        let ctx = ctx.borrow().expect("not inside evloop");
+        ctx.poll.deregister(evented).expect("error deregistering from evloop");
     })
 }
 
-fn poll_register<E: Evented>(id: usize, evented: &E, ready: Ready, opt: PollOpt) {
-    POLL.with(|p| {
-        let poll = p.borrow().expect("not inside evloop");
-        poll.register(evented, Token(id), ready, opt).expect("error registering to evloop");
+fn poll_register<E: Evented>(id: usize, kind: TokenKind, evented: &E, ready: Ready, opt: PollOpt) {
+    CTX.with(|ctx| {
+        let ctx = ctx.borrow().expect("not inside evloop");
+        ctx.poll.register(evented, Token::from_id_kind(id, kind), ready, opt).expect("error registering to evloop");
     })
 }
 
-fn poll_reregister<E: Evented>(id: usize, evented: &E, ready: Ready, opt: PollOpt) {
-    POLL.with(|p| {
-        let poll = p.borrow().expect("not inside evloop");
-        poll.reregister(evented, Token(id), ready, opt).expect("error registering to evloop");
-    })
+#[repr(u8)]
+#[derive(Eq, PartialEq, Debug, Copy, Clone)]
+pub enum TokenKind {
+    Listener,
+    Connect,
+    Connection,
+    Chan,
+    Timer,
 }
+
+trait TokenExt {
+    fn from_id_kind(id: usize, kind: TokenKind) -> Self;
+    fn to_id_kind(&self) -> (usize, TokenKind);
+}
+
+impl TokenExt for Token {
+    fn to_id_kind(&self) -> (usize, TokenKind) {
+        let id: usize = (*self).into();
+        let kind_id = (id & 0xff) as u8;
+        let kind = unsafe { mem::transmute(kind_id) };
+        (id >> TOKEN_KIND_BITS, kind)
+    }
+    fn from_id_kind(id: usize, kind: TokenKind) -> Self {
+        Token((id << TOKEN_KIND_BITS) | (kind as usize))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn enum_to_int() {
+        use self::TokenKind::*;
+        for kind in vec![Listener, Stream, Connect, Chan, Timer] {
+            let (id, kind) = (0, kind);
+            assert_eq!((id, kind), Token::from_id_kind(0, kind).to_id_kind());
+        }
+    }
+}
+
