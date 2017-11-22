@@ -13,6 +13,9 @@ use ::Error;
 const READ_SIZE: usize = 8*1024;
 
 pub trait ConnectionHandler {
+    /// called right after the connection is added to the event loop with `add_connection`.
+    #[allow(unused)]
+    fn on_add(&mut self, id: usize) {}
     /// called whenever there is new data in the connection's read buffer.
     /// The default implementation simply discards read data.
     #[allow(unused)]
@@ -35,6 +38,7 @@ pub struct ConnectionHandlerClosures<R,D,W>
           D: FnMut(usize, Option<Error>),
           W: FnMut(usize),
 {
+    // TODO: on_add
     pub on_read: R,
     pub on_disconnect: D,
     pub on_write_finished: W,
@@ -100,6 +104,10 @@ impl Connection {
             handler: RefCell::new(Box::new(handler)),
         };
         Ok(conn)
+    }
+
+    pub fn handler_on_add(&self) {
+        self.handler.borrow_mut().on_add(self.id);
     }
 
     pub fn is_writable(&self) -> bool {

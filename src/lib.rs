@@ -162,11 +162,13 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                             ctx.conns.borrow().get(id).cloned().expect("invalid token")
                         };
                         // place connections with work to be done in the read/write queues
+                        let was_readable = conn.is_readable();
+                        let was_writable = conn.is_writable();
                         conn.ready(event.readiness());
-                        if conn.is_readable() {
+                        if !was_readable && conn.is_readable() {
                             ctx.conns_readable.borrow_mut().push_back(Rc::downgrade(&conn));
                         }
-                        if conn.is_writable() {
+                        if !was_writable && conn.is_writable() {
                             ctx.conns_writable.borrow_mut().push_back(Rc::downgrade(&conn));
                         }
                     }
@@ -277,13 +279,17 @@ pub fn add_listener<H: 'static + AcceptHandler>(listener: TcpListener, handler: 
 pub fn add_connection<H: 'static + ConnectionHandler>(stream: TcpStream, handler: H) -> Result<usize, Error> {
     CTX.with(|ctx| {
         let ctx = ctx.borrow().expect("not inside evloop");
-        let mut slab = ctx.conns.borrow_mut();
-        let e = slab.vacant_entry();
-        let id = e.key();
-        poll_register(id, TokenKind::Connection, &stream,
-                      Ready::readable() | Ready::writable(), PollOpt::edge());
-        let conn = Connection::new(id, stream, handler)?;
-        e.insert(Rc::new(conn));
+        let id;
+        let conn = {
+            let mut slab = ctx.conns.borrow_mut();
+            let e = slab.vacant_entry();
+            id = e.key();
+            poll_register(id, TokenKind::Connection, &stream,
+                          Ready::readable() | Ready::writable(), PollOpt::edge());
+            let conn = Connection::new(id, stream, handler)?;
+            e.insert(Rc::new(conn)).clone()
+        };
+        conn.handler_on_add();
         Ok(id)
     })
 }
