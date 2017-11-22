@@ -92,7 +92,7 @@ pub fn connection_write<F>(id: usize, f: F) -> Result<(), Error>
 
 impl Connection {
     pub fn new<H>(id: usize, stream: TcpStream, handler: H)
-                             -> Result<Self, Error>
+                  -> Result<Self, Error>
         where H: 'static + ConnectionHandler,
     {
         let conn = Connection {
