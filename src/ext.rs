@@ -66,21 +66,3 @@ impl<'a, M: DeserializeOwned> Drop for BincodeFrameIterator<'a, M> {
         self.inner.drain(..self.pos);
     }
 }
-
-
-// pub struct FrameIterator<'a> {
-//     inner: &'a Vec<u8>,
-//     pos: usize,
-// }
-
-// impl<'a> Iterator for FrameIterator<'a> {
-//     type Item = &'a [u8];
-
-//     fn next(&mut self) -> Option<Self::Item> {
-//         if self.pos == self.inner.len() { return None };
-//         let size = BigEndian::read_u32(&self.inner[self.pos..]) as usize;
-//         let frame = &self.inner[self.pos + 4 .. self.pos + 4 + size];
-//         self.pos += 4 + size;
-//         Some(frame)
-//     }
-// }
