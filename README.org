@@ -1,1 +1,17 @@
-* Sevent: fast and simple callback based async io
+* Sevent: fast and simple async io
+Sevent is a small library on top of mio that provides a callback/handler based API for asynchronous IO.
+
+Mio is a nice low-level library, and gives a lot of flexibility on how to structure your application.
+In many cases, specially when prototyping, that flexibility ends up costing more than it gives.
+Sevent makes most of the choices for you, so you can focus on the application.
+
+Sevent provides:
+- one global event loop per thread => no tracking and passing an event loop around
+- handler/callback based event handling => no need to store or track io objects yourself
+- connection io and buffer handling => sevent call's you back when data is available and writes it out when needed
+- timeout events
+- channel events
+
+Sevent also provides a very simple to use framed protocol using serde/bincode.
+
+Check the =examples= folder to get a feel for how the library is used.
