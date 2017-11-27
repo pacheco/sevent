@@ -84,6 +84,8 @@ impl sevent::TimeoutHandler for PrintStats {
 
 
 fn main() {
+    // the first cmdline arg is the number of concurrent outstanding
+    // requests the client is allowed to have.
     sevent::run_evloop(|| {
 
         let addr = "127.0.0.1:10000".parse().unwrap();
