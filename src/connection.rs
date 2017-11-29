@@ -1,3 +1,4 @@
+use std::cmp::min;
 use std::cell::RefCell;
 use std::io::ErrorKind::WouldBlock;
 use std::io::Read;
@@ -11,6 +12,7 @@ use ::TokenKind;
 use ::Error;
 
 const READ_SIZE: usize = 8*1024;
+const WRITE_SIZE: usize = 8*1024;
 
 pub trait ConnectionHandler {
     /// called right after the connection is added to the event loop with `add_connection`.
@@ -68,6 +70,7 @@ pub struct Connection {
     pub ready: RefCell<Ready>,
     pub rbuf: RefCell<Vec<u8>>,
     pub wbuf: RefCell<Vec<u8>>,
+    wpos: RefCell<usize>,
     handler: RefCell<Box<ConnectionHandler>>,
 }
 
@@ -100,6 +103,7 @@ impl Connection {
             ready: RefCell::new(Ready::writable()),
             rbuf: RefCell::new(Vec::with_capacity(READ_SIZE)),
             wbuf: RefCell::new(Vec::with_capacity(0)),
+            wpos: RefCell::new(0),
             inner: RefCell::new(stream),
             handler: RefCell::new(Box::new(handler)),
         };
@@ -111,7 +115,11 @@ impl Connection {
     }
 
     pub fn is_writable(&self) -> bool {
-        self.ready.borrow().is_writable() && !self.wbuf.borrow().is_empty()
+        self.ready.borrow().is_writable() && self.to_write() > 0
+    }
+
+    fn to_write(&self) -> usize {
+        self.wbuf.borrow().len() - *self.wpos.borrow()
     }
 
     pub fn is_readable(&self) -> bool {
@@ -122,22 +130,27 @@ impl Connection {
     // Returns true if the connection is still ready for another
     // write, i.e.,: no errors, has data to be written and would not block
     pub fn do_write(&self) -> bool {
-        assert!(!self.wbuf.borrow().is_empty());
-        let wbuf_empty;
+        assert!(!self.to_write() > 0);
         let mut write_err = None;
         {
             let mut stream = self.inner.borrow_mut();
-            let mut wbuf = self.wbuf.borrow_mut();
-            match stream.write(&wbuf[..]) {
-                Ok(n) => { wbuf.drain(..n); }
+            let wbuf = self.wbuf.borrow_mut();
+            let wpos = { *self.wpos.borrow() };
+            let up_to = min(wpos + WRITE_SIZE, wbuf.len());
+            match stream.write(&wbuf[wpos .. up_to]) {
+                Ok(n) => {
+                    *self.wpos.borrow_mut() += n;
+                }
                 Err(err) => write_err = Some(err),
             }
-            wbuf_empty = wbuf.is_empty();
         }
 
         if let Some(err) = write_err {
             if err.kind() == WouldBlock {
                 self.ready.borrow_mut().remove(Ready::writable());
+                let mut wbuf = self.wbuf.borrow_mut();
+                wbuf.drain(.. *self.wpos.borrow());
+                *self.wpos.borrow_mut() = 0;
                 return false;
             } else {
                 error!("connection {}: {:?}", self.id, err);
@@ -148,9 +161,12 @@ impl Connection {
             }
         }
 
-        if wbuf_empty {
+        if self.to_write() == 0 {
             let mut handler = self.handler.borrow_mut();
             handler.on_write_finished(self.id);
+            let mut wbuf = self.wbuf.borrow_mut();
+            wbuf.drain(.. *self.wpos.borrow());
+            *self.wpos.borrow_mut() = 0;
             return false;
         } else {
             return true;
