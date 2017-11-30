@@ -33,9 +33,6 @@ pub use self::chan::ChanHandler;
 mod timer;
 pub use self::timer::TimeoutHandler;
 
-mod tick;
-pub use self::tick::TickHandler;
-
 pub mod ext;
 
 use std::time::Duration;
@@ -76,8 +73,6 @@ struct LoopCtx {
     conns: RefCell<Slab<Rc<Connection>>>,
     conns_readable: RefCell<VecDeque<Weak<Connection>>>,
     conns_writable: RefCell<VecDeque<Weak<Connection>>>,
-    on_current_tick: RefCell<VecDeque<Box<TickHandler>>>,
-    on_next_tick: RefCell<VecDeque<Box<TickHandler>>>,
 }
 
 thread_local! {
@@ -109,8 +104,6 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                 conns: RefCell::new(Slab::new()),
                 conns_readable: RefCell::new(VecDeque::new()),
                 conns_writable: RefCell::new(VecDeque::new()),
-                on_current_tick: RefCell::new(VecDeque::new()),
-                on_next_tick: RefCell::new(VecDeque::new()),
             }
         });
 
@@ -174,12 +167,11 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                     }
                 }
             }
-            // reading, writing and ticks may trigger a handler, which
-            // may add another write/tick, so we loop here until
+            // reading, writing trigger a handler, which
+            // may add another write, so we loop here until
             // there's nothing to do
             while {
                 !(ctx.conns_readable.borrow().is_empty()
-                  && ctx.on_current_tick.borrow().is_empty()
                   && ctx.conns_writable.borrow().is_empty())
             } {
                 // The weird structure of the loops here is because
@@ -207,18 +199,7 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                         break;
                     }
                 }
-                // handle current tick events
-                loop {
-                    let ev = { ctx.on_current_tick.borrow_mut().pop_front() };
-                    if let Some(ev) = ev {
-                        ev.on_tick();
-                    } else {
-                        break;
-                    }
-                }
             }
-            // swap current/next tick events for the next loop
-            mem::swap(&mut *ctx.on_current_tick.borrow_mut(), &mut *ctx.on_next_tick.borrow_mut());
         }
         Ok(())
     })
@@ -228,20 +209,6 @@ pub fn shutdown() {
     CTX.with(|ctx| {
         let ctx = ctx.borrow().expect("not inside evloop");
         *ctx.shutdown.borrow_mut() = true;
-    })
-}
-
-pub fn on_current_tick<H: 'static + TickHandler>(handler: H) {
-    CTX.with(|ctx| {
-        let ctx = ctx.borrow().expect("not inside evloop");
-        ctx.on_current_tick.borrow_mut().push_back(Box::new(handler));
-    })
-}
-
-pub fn on_next_tick<H: 'static + TickHandler>(handler: H) {
-    CTX.with(|ctx| {
-        let ctx = ctx.borrow().expect("not inside evloop");
-        ctx.on_next_tick.borrow_mut().push_back(Box::new(handler));
     })
 }
 
