@@ -11,8 +11,8 @@ use mio::net::TcpStream;
 use ::TokenKind;
 use ::Error;
 
-const READ_SIZE: usize = 8*1024;
-const WRITE_SIZE: usize = 8*1024;
+const READ_SIZE: usize = 16*1024;
+const WRITE_SIZE: usize = 16*1024;
 
 pub trait ConnectionHandler {
     /// called right after the connection is added to the event loop with `add_connection`.
