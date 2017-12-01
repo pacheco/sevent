@@ -1,5 +1,8 @@
 extern crate sevent;
 extern crate mio;
+extern crate bytes;
+
+use bytes::BufMut;
 
 use mio::net::TcpStream;
 
@@ -8,7 +11,8 @@ struct Echo;
 impl sevent::ConnectionHandler for Echo {
     fn on_read(&mut self, id: usize, buf: &mut Vec<u8>) {
         sevent::connection_write(id, |wbuf| {
-            wbuf.extend(buf.drain(..));
+            wbuf.put_slice(&buf[..]);
+            buf.drain(..);
         }).unwrap();
     }
 

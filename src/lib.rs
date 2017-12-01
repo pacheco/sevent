@@ -7,9 +7,14 @@ extern crate bytes;
 extern crate mio_more;
 extern crate bincode;
 extern crate serde;
+extern crate rand;
+
+use rand::Rng;
 
 pub mod errors;
 pub use errors::Error;
+
+pub mod circular_buf;
 
 mod connection;
 use self::connection::Connection;
@@ -63,9 +68,12 @@ use lazycell::LazyCell;
 const TOKEN_KIND_BITS: usize = 3;
 const TOKEN_KIND_MASK: usize = 0b111;
 
+const POLL_TIMEOUT_NS: u32 = 10_000;
+
 struct LoopCtx {
     poll: Poll,
     shutdown: RefCell<bool>,
+    max_pending_write: RefCell<usize>,
     listeners: RefCell<Slab<Rc<Listener>>>,
     connects: RefCell<Slab<Rc<Connect>>>,
     timer: RefCell<mio_timer::Timer<Box<TimeoutHandler>>>,
@@ -79,15 +87,6 @@ thread_local! {
     static CTX: LazyCell<LoopCtx> = LazyCell::new();
 }
 
-#[derive(Clone)]
-pub enum Context {
-    // Connection(Rc<Connection>),
-    // Connect(Rc<Connect>),
-    // Listener(Rc<Listener>),
-    // Chan(Rc<Chan>),
-    // Timer(Rc<RefCell<mio_timer::Timer<Box<TimeoutHandler>>>>),
-}
-
 pub fn run_evloop<F>(init: F) -> Result<(), Error>
     where F: FnOnce() -> Result<(), Error>
 {
@@ -97,6 +96,7 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
             LoopCtx {
                 poll: Poll::new().expect("could not create event poll"),
                 shutdown: RefCell::new(false),
+                max_pending_write: RefCell::new(0),
                 listeners: RefCell::new(Slab::new()),
                 connects: RefCell::new(Slab::new()),
                 timer: RefCell::new(mio_timer::Timer::default()),
@@ -113,9 +113,20 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
         // user initialization
         init()?;
 
+        // at every loop tick, we don't write/read until
+        // wouldblock. Instead, whenever there are connections already
+        // writeable/readable, we don't do a blocking poll.
+        let mut pending_writes_or_reads = false;
+
         let mut events = Events::with_capacity(1024);
+
         while !*ctx.shutdown.borrow() {
-            match ctx.poll.poll(&mut events, None) {
+            let poll_timeout = if pending_writes_or_reads {
+                Some(Duration::new(0, POLL_TIMEOUT_NS))
+            } else {
+                None
+            };
+            match ctx.poll.poll(&mut events, poll_timeout) {
                 Ok(_) => (),
                 Err(ref err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) => return Err(Error::from(err)),
@@ -167,36 +178,52 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                     }
                 }
             }
-            // reading, writing trigger a handler, which
-            // may add another write, so we loop here until
-            // there's nothing to do
-            while {
-                !(ctx.conns_readable.borrow().is_empty()
-                  && ctx.conns_writable.borrow().is_empty())
-            } {
-                // The weird structure of the loops here is because
-                // the borrow checker is too conservative
 
-                // handle reads
-                loop {
+            // read something from every readable connection
+            {
+                let rcnt = ctx.conns_readable.borrow().len();
+                // start from a random connection
+                if rcnt > 0 {
+                    for _ in 0 .. rand::thread_rng().gen_range(0, rcnt) {
+                        let mut conns = ctx.conns_readable.borrow_mut();
+                        let conn = conns.pop_front().unwrap();
+                        conns.push_back(conn);
+                    }
+                }
+                for _ in 0 .. rcnt {
                     let wconn = { ctx.conns_readable.borrow_mut().pop_front() };
                     if let Some(conn) = wconn.and_then(|wconn| wconn.upgrade()) {
                         if conn.do_read() {
+                            pending_writes_or_reads = true;
                             ctx.conns_readable.borrow_mut().push_back(Rc::downgrade(&conn));
                         }
-                    } else {
-                        break;
                     }
                 }
-                // handle writes
-                loop {
+            }
+
+            // write something to each writable connection
+            {
+                let wcnt = ctx.conns_writable.borrow().len();
+                // start from a random connection
+                if wcnt > 0 {
+                    for _ in 0 .. rand::thread_rng().gen_range(0, wcnt) {
+                        let mut conns = ctx.conns_writable.borrow_mut();
+                        let conn = conns.pop_front().unwrap();
+                        conns.push_back(conn);
+                    }
+                }
+                for _ in 0 .. wcnt {
                     let wconn = { ctx.conns_writable.borrow_mut().pop_front() };
                     if let Some(conn) = wconn.and_then(|wconn| wconn.upgrade()) {
                         if conn.do_write() {
+                            pending_writes_or_reads = true;
                             ctx.conns_writable.borrow_mut().push_back(Rc::downgrade(&conn));
+                        } else {
+                            if *ctx.max_pending_write.borrow() < conn.wbuf.borrow().len() {
+                                *ctx.max_pending_write.borrow_mut() = conn.wbuf.borrow().len();
+                                println!("MAX PENDING WRITE: {:?}", ctx.max_pending_write.borrow());
+                            }
                         }
-                    } else {
-                        break;
                     }
                 }
             }

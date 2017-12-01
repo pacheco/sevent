@@ -5,8 +5,12 @@ use std::io::Read;
 use std::io::Write;
 use std::rc::Rc;
 
+use bytes::Buf;
+
 use mio::Ready;
 use mio::net::TcpStream;
+
+use ::circular_buf::CircularBuffer;
 
 use ::TokenKind;
 use ::Error;
@@ -69,13 +73,12 @@ pub struct Connection {
     pub inner: RefCell<TcpStream>,
     pub ready: RefCell<Ready>,
     pub rbuf: RefCell<Vec<u8>>,
-    pub wbuf: RefCell<Vec<u8>>,
-    wpos: RefCell<usize>,
+    pub wbuf: RefCell<CircularBuffer>,
     handler: RefCell<Box<ConnectionHandler>>,
 }
 
 pub fn connection_write<F>(id: usize, f: F) -> Result<(), Error>
-    where F: FnOnce(&mut Vec<u8>)
+    where F: FnOnce(&mut CircularBuffer),
 {
     super::CTX.with(|ctx| {
         let ctx = ctx.borrow().expect("not inside evloop");
@@ -102,8 +105,7 @@ impl Connection {
             id,
             ready: RefCell::new(Ready::writable()),
             rbuf: RefCell::new(Vec::with_capacity(READ_SIZE)),
-            wbuf: RefCell::new(Vec::with_capacity(0)),
-            wpos: RefCell::new(0),
+            wbuf: RefCell::new(CircularBuffer::with_capacity(0)),
             inner: RefCell::new(stream),
             handler: RefCell::new(Box::new(handler)),
         };
@@ -119,7 +121,7 @@ impl Connection {
     }
 
     fn to_write(&self) -> usize {
-        self.wbuf.borrow().len() - *self.wpos.borrow()
+        self.wbuf.borrow().remaining()
     }
 
     pub fn is_readable(&self) -> bool {
@@ -134,23 +136,26 @@ impl Connection {
         let mut write_err = None;
         {
             let mut stream = self.inner.borrow_mut();
-            let wbuf = self.wbuf.borrow_mut();
-            let wpos = { *self.wpos.borrow() };
-            let up_to = min(wpos + WRITE_SIZE, wbuf.len());
-            match stream.write(&wbuf[wpos .. up_to]) {
-                Ok(n) => {
-                    *self.wpos.borrow_mut() += n;
+            let mut wbuf = self.wbuf.borrow_mut();
+            let to_advance = {
+                let bytes = wbuf.bytes();
+                let up_to = min(WRITE_SIZE, bytes.len());
+                match stream.write(&bytes[.. up_to]) {
+                    Ok(n) => {
+                        n
+                    }
+                    Err(err) => {
+                        write_err = Some(err);
+                        0
+                    }
                 }
-                Err(err) => write_err = Some(err),
-            }
+            };
+            wbuf.advance(to_advance);
         }
 
         if let Some(err) = write_err {
             if err.kind() == WouldBlock {
                 self.ready.borrow_mut().remove(Ready::writable());
-                let mut wbuf = self.wbuf.borrow_mut();
-                wbuf.drain(.. *self.wpos.borrow());
-                *self.wpos.borrow_mut() = 0;
                 return false;
             } else {
                 error!("connection {}: {:?}", self.id, err);
@@ -164,9 +169,6 @@ impl Connection {
         if self.to_write() == 0 {
             let mut handler = self.handler.borrow_mut();
             handler.on_write_finished(self.id);
-            let mut wbuf = self.wbuf.borrow_mut();
-            wbuf.drain(.. *self.wpos.borrow());
-            *self.wpos.borrow_mut() = 0;
             return false;
         } else {
             return true;

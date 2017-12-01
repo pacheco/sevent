@@ -7,6 +7,7 @@ authors = ["Leandro Pacheco <contact@leandropacheco.com>"]
 log = "0.3"
 env_logger = "0.4"
 lazycell = "0.5"
+rand = "0.3"
 
 mio = "0.6"
 mio-more = "0.1"
@@ -19,7 +20,6 @@ bincode = "0.9"
 [dev-dependencies]
 serde_derive = "1.0"
 histogram = "0.6"
-rand = "0.3"
 
 [profile.release]
 debug = true

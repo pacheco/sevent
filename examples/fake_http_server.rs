@@ -1,5 +1,8 @@
 extern crate sevent;
 extern crate mio;
+extern crate bytes;
+
+use bytes::BufMut;
 
 use mio::net::TcpListener;
 
@@ -27,7 +30,7 @@ fn main() {
                 on_write_finished: |id| {
                     // write to client
                     sevent::connection_write(id, |wbuf| {
-                        wbuf.extend_from_slice(RESPONSE.as_bytes());
+                        wbuf.put_slice(RESPONSE.as_bytes());
                     }).unwrap()
                 },
             }).unwrap();
@@ -36,7 +39,7 @@ fn main() {
 
             // write to client
             sevent::connection_write(id, |wbuf| {
-                wbuf.extend_from_slice(RESPONSE.as_bytes());
+                wbuf.put_slice(RESPONSE.as_bytes());
             }).unwrap()
         }).unwrap();
         Ok(())
