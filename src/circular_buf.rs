@@ -2,6 +2,7 @@ use std;
 use std::slice;
 use std::ptr;
 use std::marker::PhantomData;
+use std::mem;
 use std::cmp;
 
 use bytes::Buf;
@@ -61,27 +62,14 @@ impl CircularBuffer {
             let end = (self.start + self.remaining) % cap;
             assert!(end <= self.start);
             let start_to_cap = cap - self.start;
-            // we make extra-space based on the smaller "half" of the data
-            if start_to_cap < end {
-                self.inner.reserve(cap + start_to_cap);
-                let ptr = self.inner.as_mut_ptr();
-                unsafe {
-                    // move start half to the "extra space"
-                    ptr::copy(ptr.offset(self.start as isize), ptr.offset(cap as isize), start_to_cap);
-                    // move end half up
-                    ptr::copy(ptr, ptr.offset(start_to_cap as isize), end);
-                    // move start to zero
-                    ptr::copy(ptr.offset(cap as isize), ptr, start_to_cap);
-                }
-            } else {
-                self.inner.reserve(cap + end);
-                let ptr = self.inner.as_mut_ptr();
-                unsafe {
-                    // move end half to right after start half (make it contiguous)
-                    ptr::copy(ptr, ptr.offset(cap as isize), end);
-                    // move everything to the beginning
-                    ptr::copy(ptr.offset(self.start as isize), ptr, self.remaining);
-                }
+            let mut old = mem::replace(&mut self.inner, Vec::with_capacity(cap));
+            let old_ptr = old.as_mut_ptr();
+            let ptr = self.inner.as_mut_ptr();
+            unsafe {
+                // copy start .. cap
+                ptr::copy_nonoverlapping(old_ptr.offset(self.start as isize), ptr, start_to_cap);
+                // copy 0 .. end
+                ptr::copy_nonoverlapping(old_ptr, ptr.offset(start_to_cap as isize), end);
             }
             self.start = 0;
             true
@@ -171,11 +159,19 @@ impl BufMut for CircularBuffer {
                     self.inner.reserve(cap*2);
                 }
             } else {
-                // fix data so it begins at the start of the buffer
-                self.inner.reserve(cap*2);
+                let end = (self.start + self.remaining) % self.inner.capacity();
+                // double the buffer and make data start at 0 again
+                let mut old = mem::replace(&mut self.inner, Vec::with_capacity(cap*2));
+                let old_ptr = old.as_mut_ptr();
                 let ptr = self.inner.as_mut_ptr();
-                ptr::copy(ptr, ptr.offset(cap as isize), self.start);
-                ptr::copy(ptr.offset(self.start as isize), ptr, cap);
+                // copy start .. cap
+                ptr::copy_nonoverlapping(old_ptr.offset(self.start as isize),
+                                         ptr,
+                                         cap - self.start);
+                // copy 0 .. end
+                ptr::copy_nonoverlapping(old_ptr,
+                                         ptr.offset((cap - self.start) as isize),
+                                         end);
                 self.start = 0;
             }
         }
