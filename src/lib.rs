@@ -417,20 +417,3 @@ impl TokenExt for Token {
         Token((id << TOKEN_KIND_BITS) | (kind as usize))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn enum_to_int() {
-        for kind in vec![TokenKind::Listener,
-                         TokenKind::Connection,
-                         TokenKind::Connect,
-                         TokenKind::Chan,
-                         TokenKind::Timer] {
-            assert_eq!((0, kind), Token::from_id_kind(0, kind).to_id_kind());
-            assert_eq!((123, kind), Token::from_id_kind(123, kind).to_id_kind());
-        }
-    }
-}
-

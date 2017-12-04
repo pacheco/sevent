@@ -1,14 +1,18 @@
 use std;
 use std::slice;
 use std::ptr;
+use std::marker::PhantomData;
+use std::cmp;
 
 use bytes::Buf;
 use bytes::BufMut;
 use bytes::BigEndian;
+use bytes::ByteOrder;
 
 use bincode;
 
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 const INITIAL_CAP: usize = 1024;
 
@@ -16,7 +20,8 @@ const INITIAL_CAP: usize = 1024;
 pub struct CircularBuffer {
     inner: Vec<u8>,
     start: usize,
-    end: usize,
+    /// amount of data in the buffer
+    remaining: usize,
 }
 
 impl CircularBuffer {
@@ -29,16 +34,58 @@ impl CircularBuffer {
         CircularBuffer {
             inner,
             start: 0,
-            end: 0,
+            remaining: 0,
         }
     }
 
     pub fn len(&self) -> usize {
-        self.remaining()
+        self.remaining
     }
 
     pub fn capacity(&self) -> usize {
-        self.inner.capacity() - self.remaining()
+        self.inner.capacity() - self.remaining
+    }
+
+    /// Makes sure the first 'cnt' available bytes are contiguous.
+    /// Returns false if there is not enough data.
+    pub fn pullup(&mut self, cnt: usize) -> bool {
+        if cnt > self.remaining {
+            false
+        } else if cnt <= self.inner.capacity() - self.start {
+            // already contiguous
+            true
+        } else {
+            // if we got here, the two halves of the circ buffer are
+            // not contiguous. Shuffle data around so start is 0.
+            let cap = self.inner.capacity();
+            let end = (self.start + self.remaining) % cap;
+            assert!(end <= self.start);
+            let start_to_cap = cap - self.start;
+            // we make extra-space based on the smaller "half" of the data
+            if start_to_cap < end {
+                self.inner.reserve(cap + start_to_cap);
+                let ptr = self.inner.as_mut_ptr();
+                unsafe {
+                    // move start half to the "extra space"
+                    ptr::copy(ptr.offset(self.start as isize), ptr.offset(cap as isize), start_to_cap);
+                    // move end half up
+                    ptr::copy(ptr, ptr.offset(start_to_cap as isize), end);
+                    // move start to zero
+                    ptr::copy(ptr.offset(cap as isize), ptr, start_to_cap);
+                }
+            } else {
+                self.inner.reserve(cap + end);
+                let ptr = self.inner.as_mut_ptr();
+                unsafe {
+                    // move end half to right after start half (make it contiguous)
+                    ptr::copy(ptr, ptr.offset(cap as isize), end);
+                    // move everything to the beginning
+                    ptr::copy(ptr.offset(self.start as isize), ptr, self.remaining);
+                }
+            }
+            self.start = 0;
+            true
+        }
     }
 
     pub fn put_frame_bincode<M: Serialize>(&mut self, msg: &M) -> Result<(), bincode::Error> {
@@ -48,6 +95,48 @@ impl CircularBuffer {
         bincode::serialize_into(&mut self.writer(), msg, bincode::Bounded(size as u64))?;
         Ok(())
     }
+
+    pub fn drain_frames_bincode<'a, M: DeserializeOwned>(&'a mut self) -> BincodeFrameIterator<'a, M> {
+        BincodeFrameIterator {
+            inner: self,
+            phantom: PhantomData,
+        }
+    }
+}
+
+pub struct BincodeFrameIterator<'a, M: DeserializeOwned> {
+    inner: &'a mut CircularBuffer,
+    phantom: PhantomData<M>,
+}
+
+impl<'a, M: DeserializeOwned> Iterator for BincodeFrameIterator<'a, M> {
+    type Item = Result<M, bincode::Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // do we have a header?
+        if self.inner.pullup(4) {
+            let size = {
+                let hdr = &self.inner.bytes()[0..4];
+                BigEndian::read_u32(hdr) as usize
+            };
+            // do we have the data?
+            if self.inner.pullup(4 + size) {
+                let res = {
+                    let msg = &self.inner.bytes()[4..4+size];
+                    bincode::deserialize(msg)
+                };
+                self.inner.advance(4+size);
+                return Some(res);
+            }
+        }
+        None
+    }
+}
+
+impl<'a, M: DeserializeOwned> Drop for BincodeFrameIterator<'a, M> {
+    fn drop(&mut self) {
+        while let Some(_) = self.next() {}
+    }
 }
 
 impl BufMut for CircularBuffer {
@@ -56,90 +145,73 @@ impl BufMut for CircularBuffer {
     }
 
     unsafe fn advance_mut(&mut self, cnt: usize) {
+        assert!(self.inner.capacity() - self.remaining >= cnt);
+        let end = (self.start + self.remaining) % self.inner.capacity();
         // it doesn't make sense to advance past whatever was
-        // returned by a bytes_mut, so we panic without
-        // considering remaining_mut to catch bugs
-        if self.end >= self.start {
-            assert!(self.end + cnt <= self.inner.capacity() + self.start,
-                    "CircularBuffer advance_mut past what was returned by bytes_mut");
-            self.end = self.end + cnt;
+        // returned by a bytes_mut, so we assert to catch bugs
+        if end >= self.start {
+            assert!(end + cnt <= self.inner.capacity(),
+                    "CircularBuffer advance_mut past what bytes_mut would return");
         } else {
-            assert!(self.end + cnt <= self.start,
-                    "CircularBuffer advance_mut past what was returned by bytes_mut");
-            self.end += cnt;
+            assert!(end + cnt <= self.start,
+                    "CircularBuffer advance_mut past what bytes_mut would return");
         }
+        self.remaining += cnt;
     }
 
     unsafe fn bytes_mut(&mut self) -> &mut [u8] {
-        if self.end >= self.start {
-            if self.end == self.inner.capacity() {
-                if self.start == 0 {
-                    // simply extend the vec
-                    let cap = self.inner.capacity();
-                    if cap == 0 {
-                        self.inner.reserve(INITIAL_CAP);
-                    } else {
-                        self.inner.reserve(cap*2);
-                    }
+        // check if we need to alloc more space
+        if self.remaining == self.inner.capacity() {
+            let cap = self.inner.capacity();
+            if self.start == 0 {
+                // easy, just make more space at the end
+                if cap == 0 {
+                    self.inner.reserve(INITIAL_CAP);
                 } else {
-                    // return space at the start of the buffer
-                    self.end = 0;
-                    let ptr = self.inner.as_mut_ptr();
-                    let slice = slice::from_raw_parts_mut(ptr, self.inner.capacity());
-                    return &mut slice[.. self.start]
+                    self.inner.reserve(cap*2);
                 }
-            } else if self.end == self.start && self.start > 0 {
-                // end and start meet in the middle of the vec. Extend and shuffle data so start is again at 0
-                let cap = self.inner.capacity();
+            } else {
+                // fix data so it begins at the start of the buffer
                 self.inner.reserve(cap*2);
                 let ptr = self.inner.as_mut_ptr();
                 ptr::copy(ptr, ptr.offset(cap as isize), self.start);
                 ptr::copy(ptr.offset(self.start as isize), ptr, cap);
                 self.start = 0;
-                self.end = cap;
             }
-            let ptr = self.inner.as_mut_ptr();
-            let slice = slice::from_raw_parts_mut(ptr, self.inner.capacity());
-            &mut slice[self.end ..]
-        } else {
-            let ptr = self.inner.as_mut_ptr();
-            let slice = slice::from_raw_parts_mut(ptr, self.inner.capacity());
-            &mut slice[self.end .. self.start]
         }
+
+        let end = (self.start + self.remaining) % self.inner.capacity();
+        let ptr = self.inner.as_mut_ptr();
+        let slice = slice::from_raw_parts_mut(ptr, self.inner.capacity());
+
+        let up_to = if self.start <= end {
+            self.inner.capacity()
+        } else {
+            self.start
+        };
+
+        &mut slice[end .. up_to]
     }
 }
 
 impl Buf for CircularBuffer {
     fn remaining(&self) -> usize {
-        if self.end >= self.start {
-            self.end - self.start
-        } else {
-            self.end + self.inner.capacity() - self.start
-        }
+        self.remaining
     }
 
     fn bytes(&self) -> &[u8] {
-        if self.end >= self.start {
-            let ptr = self.inner.as_ptr();
-            let slice = unsafe { slice::from_raw_parts(ptr, self.inner.capacity()) };
-            &slice[self.start .. self.end]
-        } else {
-            let ptr = self.inner.as_ptr();
-            let slice = unsafe { slice::from_raw_parts(ptr, self.inner.capacity()) };
-            &slice[self.start ..]
-        }
+        let ptr = self.inner.as_ptr();
+        let slice = unsafe { slice::from_raw_parts(ptr, self.inner.capacity()) };
+        let end = cmp::min(self.start + self.remaining, self.inner.capacity());
+        &slice[self.start .. end]
     }
 
     fn advance(&mut self, cnt: usize) {
-        assert!(cnt <= self.remaining());
-        if self.end >= self.start {
-            self.start += cnt;
-        } else {
-            self.start = (self.start + cnt) % self.inner.capacity();
-        }
-        if self.start == self.end {
+        assert!(cnt <= self.remaining);
+        self.start = (self.start + cnt) % self.inner.capacity();
+        self.remaining -= cnt;
+        if self.remaining == 0 {
             self.start = 0;
-            self.end = 0;
         }
     }
 }
@@ -234,5 +306,47 @@ mod tests {
             // buffer should be reset since start/end have met
             assert_eq!(cb.bytes_mut().len(), 10);
         }
+    }
+
+    #[test]
+    fn circular_buffer_pullup() {
+        let mut cb = CircularBuffer::with_capacity(10);
+        assert!(cb.pullup(0));
+        assert!(!cb.pullup(1));
+
+        cb.put_u64::<BigEndian>(0x1122334455667788);
+        assert!(cb.pullup(8));
+        assert!(!cb.pullup(9));
+
+        assert_eq!(cb.get_u32::<BigEndian>(), 0x11223344); // read 4
+        assert_eq!(cb.get_u16::<BigEndian>(), 0x5566); // read 2
+        assert!(cb.pullup(2));
+        assert!(!cb.pullup(3));
+        cb.put_u64::<BigEndian>(0x1122334455667788); // put 8 => buffer full and starting at 6
+        // this will be broken up in two parts
+        assert_eq!(cb.remaining(), 10);
+        assert_eq!(cb.bytes().len(), 4);
+        // make it contiguous
+        assert!(cb.pullup(5));
+        assert_eq!(cb.remaining(), 10);
+        assert_eq!(cb.bytes().len(), 10);
+        assert_eq!(cb.get_u16::<BigEndian>(), 0x7788); // read 2
+        assert_eq!(cb.remaining(), 8);
+        assert_eq!(cb.bytes().len(), 8);
+        assert_eq!(cb.get_u64::<BigEndian>(), 0x1122334455667788);
+    }
+
+    #[test]
+    fn circular_buffer_bincode() {
+        let mut cb = CircularBuffer::with_capacity(3);
+        let msg0 = (1u64, Some(true), "foobar".to_owned());
+        let msg1 = (1234u64, Some(false), "bladsf lakds jfkjsa kfdjds".to_owned());
+        cb.put_frame_bincode(&msg0).unwrap();
+        cb.put_frame_bincode(&msg1).unwrap();
+        let msgs: Vec<Result<(u64, Option<bool>, String), bincode::Error>> = cb.drain_frames_bincode().collect();
+        assert_eq!(msgs[0].as_ref().expect("deserialization failure"),
+                   &msg0);
+        assert_eq!(msgs[1].as_ref().expect("deserialization failure"),
+                   &msg1);
     }
 }

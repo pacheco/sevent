@@ -2,6 +2,7 @@ extern crate sevent;
 extern crate mio;
 extern crate bytes;
 
+use bytes::Buf;
 use bytes::BufMut;
 
 use mio::net::TcpListener;
@@ -22,7 +23,9 @@ fn main() {
 
             let id = sevent::add_connection(stream, sevent::ConnectionHandlerClosures {
                 on_read: |_id, buf| {
-                    buf.drain(..); // just discard the data on read
+                    // just discard the data on read
+                    let remaining = buf.remaining();
+                    buf.advance(remaining);
                 },
                 on_disconnect: |id, err| {
                     println!("client {} disconnected: {:?}", id, err);

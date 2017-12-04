@@ -8,14 +8,14 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::collections::HashSet;
 
-use sevent::ext::VecExt;
+use sevent::circular_buf::CircularBuffer;
 
 struct Echo {
     connections: Rc<RefCell<HashSet<usize>>>,
 }
 
 impl sevent::ConnectionHandler for Echo {
-    fn on_read(&mut self, _id: usize, buf: &mut Vec<u8>) {
+    fn on_read(&mut self, _id: usize, buf: &mut CircularBuffer) {
         let connections = self.connections.borrow();
         for msg in buf.drain_frames_bincode() {
             let msg: (u64, SystemTime) = msg.unwrap();

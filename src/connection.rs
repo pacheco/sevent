@@ -6,6 +6,7 @@ use std::io::Write;
 use std::rc::Rc;
 
 use bytes::Buf;
+use bytes::BufMut;
 
 use mio::Ready;
 use mio::net::TcpStream;
@@ -25,8 +26,9 @@ pub trait ConnectionHandler {
     /// called whenever there is new data in the connection's read buffer.
     /// The default implementation simply discards read data.
     #[allow(unused)]
-    fn on_read(&mut self, id: usize, buf: &mut Vec<u8>) {
-        buf.drain(..);
+    fn on_read(&mut self, id: usize, buf: &mut CircularBuffer) {
+        let remaining = buf.remaining();
+        buf.advance(remaining);
     }
     /// called when the connection is disconnected. There is no need
     /// to call del: the connection automatically deletes itself on
@@ -40,7 +42,7 @@ pub trait ConnectionHandler {
 }
 
 pub struct ConnectionHandlerClosures<R,D,W>
-    where R: FnMut(usize, &mut Vec<u8>),
+    where R: FnMut(usize, &mut CircularBuffer),
           D: FnMut(usize, Option<Error>),
           W: FnMut(usize),
 {
@@ -51,11 +53,11 @@ pub struct ConnectionHandlerClosures<R,D,W>
 }
 
 impl<R, D, W> ConnectionHandler for ConnectionHandlerClosures<R,D,W>
-    where R: FnMut(usize, &mut Vec<u8>),
+    where R: FnMut(usize, &mut CircularBuffer),
           D: FnMut(usize, Option<Error>),
           W: FnMut(usize),
 {
-    fn on_read(&mut self, id: usize, buf: &mut Vec<u8>) {
+    fn on_read(&mut self, id: usize, buf: &mut CircularBuffer) {
         (self.on_read)(id, buf)
     }
 
@@ -72,7 +74,7 @@ pub struct Connection {
     pub id: usize,
     pub inner: RefCell<TcpStream>,
     pub ready: RefCell<Ready>,
-    pub rbuf: RefCell<Vec<u8>>,
+    pub rbuf: RefCell<CircularBuffer>,
     pub wbuf: RefCell<CircularBuffer>,
     handler: RefCell<Box<ConnectionHandler>>,
 }
@@ -104,8 +106,8 @@ impl Connection {
         let conn = Connection {
             id,
             ready: RefCell::new(Ready::writable()),
-            rbuf: RefCell::new(Vec::with_capacity(READ_SIZE)),
-            wbuf: RefCell::new(CircularBuffer::with_capacity(0)),
+            rbuf: RefCell::new(CircularBuffer::with_capacity(READ_SIZE)),
+            wbuf: RefCell::new(CircularBuffer::with_capacity(WRITE_SIZE)),
             inner: RefCell::new(stream),
             handler: RefCell::new(Box::new(handler)),
         };
@@ -179,19 +181,16 @@ impl Connection {
     // still ready for another read, i.e.,: no errors and would not
     // block.
     pub fn do_read(&self) -> bool {
-        let orig_len;
         let mut rbuf = self.rbuf.borrow_mut();
         match {
             let mut stream = self.inner.borrow_mut();
-            rbuf.reserve(READ_SIZE);
-            orig_len = rbuf.len();
-            unsafe { rbuf.set_len(orig_len + READ_SIZE) };
-            stream.read(&mut rbuf[orig_len..])
+            let bytes = unsafe { rbuf.bytes_mut() };
+            let up_to = min(READ_SIZE, bytes.len());
+            stream.read(&mut bytes[..up_to])
         } {
             Ok(0) => {
                 // remote side closed
                 error!("connection {}: remote closed for writing", self.id);
-                unsafe { rbuf.set_len(orig_len) };
                 // TODO: should we handle partial close?
                 super::del(self.id, TokenKind::Connection).unwrap();
                 let mut handler = self.handler.borrow_mut();
@@ -199,20 +198,18 @@ impl Connection {
                 return false;
             }
             Ok(n) => {
-                unsafe { rbuf.set_len(orig_len + n) };
+                unsafe { rbuf.advance_mut(n) };
                 // we read something
                 let mut handler = self.handler.borrow_mut();
                 handler.on_read(self.id, &mut rbuf);
                 return true;
             }
             Err(ref err) if err.kind() == WouldBlock => {
-                unsafe { rbuf.set_len(orig_len) };
                 self.ready.borrow_mut().remove(Ready::readable());
                 return false;
             }
             Err(err) => {
                 error!("connection {}: {:?}", self.id, err);
-                unsafe { rbuf.set_len(orig_len) };
                 super::del(self.id, TokenKind::Connection).unwrap();
                 let mut handler = self.handler.borrow_mut();
                 handler.on_disconnect(self.id, Some(err.into()));

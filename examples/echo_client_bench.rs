@@ -5,7 +5,7 @@ extern crate mio;
 
 use histogram::Histogram;
 
-use sevent::ext::VecExt;
+use sevent::circular_buf::CircularBuffer;
 
 use std::time::Duration;
 use std::time::SystemTime;
@@ -26,7 +26,7 @@ pub fn duration_as_usecs(d: Duration) -> u64 {
 }
 
 impl sevent::ConnectionHandler for Echo {
-    fn on_read(&mut self, id: usize, buf: &mut Vec<u8>) {
+    fn on_read(&mut self, id: usize, buf: &mut CircularBuffer) {
         let mut pending = self.pending.borrow_mut();
         for msg in buf.drain_frames_bincode() {
             let (msg_id, send_time): (u64, SystemTime) = msg.unwrap();

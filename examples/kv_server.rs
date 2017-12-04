@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use mio::net::TcpListener;
 use mio::net::TcpStream;
 
-use sevent::ext::VecExt;
+use sevent::circular_buf::CircularBuffer;
 
 #[derive(Serialize,Deserialize)]
 enum Request {
@@ -40,7 +40,7 @@ impl sevent::AcceptHandler for Server {
 }
 
 impl sevent::ConnectionHandler for Server {
-    fn on_read(&mut self, conn_id: usize, buf: &mut Vec<u8>) {
+    fn on_read(&mut self, conn_id: usize, buf: &mut CircularBuffer) {
         for msg in buf.drain_frames_bincode() {
             let reply = match msg.unwrap() {
                 Request::Get { key } => {
