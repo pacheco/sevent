@@ -78,7 +78,8 @@ const DEFAULT_MAX_WRITE_SIZE: usize = 16*1024;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
     pub randomize_work: bool,
-    pub work_until_would_block: bool,
+    pub read_until_would_block: bool,
+    pub write_until_would_block: bool,
     pub max_read_size: usize,
     pub max_write_size: usize,
 }
@@ -88,8 +89,10 @@ impl std::default::Default for Config {
         Config {
             /// Randomize order in which connections are handled at each loop tick
             randomize_work: true,
-            /// Won't check for new events until all current work is done
-            work_until_would_block: false,
+            /// Won't check for new events until all current writes are done
+            write_until_would_block: false,
+            /// Won't check for new events until all current reads are done
+            read_until_would_block: false,
             /// Maximum amount of bytes to read at each "read" syscall
             max_read_size: DEFAULT_MAX_READ_SIZE,
             /// Maximum amount of bytes to write at each "write" syscall
@@ -220,6 +223,11 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
             {
                 let mut rcnt = ctx.conns_readable.borrow().len();
                 if cfg.randomize_work {
+                    // let mut rconn = ctx.conns_readable.borrow_mut();
+                    // let mut vec: Vec<_> = rconn.iter().cloned().collect();
+                    // rand::thread_rng().shuffle(&mut vec[..]);
+                    // *rconn = vec.into_iter().collect();
+
                     // start from a random connection
                     if rcnt > 0 {
                         for _ in 0 .. rand::thread_rng().gen_range(0, rcnt) {
@@ -230,7 +238,7 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                     }
                 }
                 loop {
-                    if !cfg.work_until_would_block {
+                    if !cfg.read_until_would_block {
                         // work once with each connection and poll again
                         if rcnt == 0 { break; }
                         rcnt -= 1;
@@ -251,6 +259,11 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
             {
                 let mut wcnt = ctx.conns_writable.borrow().len();
                 if cfg.randomize_work {
+                    // let mut wconn = ctx.conns_writable.borrow_mut();
+                    // let mut vec: Vec<_> = wconn.iter().cloned().collect();
+                    // rand::thread_rng().shuffle(&mut vec[..]);
+                    // *wconn = vec.into_iter().collect();
+
                     // start from a random connection
                     if wcnt > 0 {
                         for _ in 0 .. rand::thread_rng().gen_range(0, wcnt) {
@@ -261,7 +274,7 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                     }
                 }
                 loop {
-                    if !cfg.work_until_would_block {
+                    if !cfg.write_until_would_block {
                         // work once with each connection and poll again
                         if wcnt == 0 { break; }
                         wcnt -= 1;
