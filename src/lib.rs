@@ -6,6 +6,8 @@ extern crate slab;
 extern crate bytes;
 extern crate mio_more;
 extern crate bincode;
+#[macro_use]
+extern crate serde_derive;
 extern crate serde;
 extern crate rand;
 
@@ -70,6 +72,32 @@ const TOKEN_KIND_MASK: usize = 0b111;
 
 const POLL_TIMEOUT_NS: u32 = 10_000;
 
+const DEFAULT_MAX_READ_SIZE: usize = 16*1024;
+const DEFAULT_MAX_WRITE_SIZE: usize = 16*1024;
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Config {
+    pub randomize_work: bool,
+    pub work_until_would_block: bool,
+    pub max_read_size: usize,
+    pub max_write_size: usize,
+}
+
+impl std::default::Default for Config {
+    fn default() -> Self {
+        Config {
+            /// Randomize order in which connections are handled at each loop tick
+            randomize_work: true,
+            /// Won't check for new events until all current work is done
+            work_until_would_block: false,
+            /// Maximum amount of bytes to read at each "read" syscall
+            max_read_size: DEFAULT_MAX_READ_SIZE,
+            /// Maximum amount of bytes to write at each "write" syscall
+            max_write_size: DEFAULT_MAX_WRITE_SIZE,
+        }
+    }
+}
+
 struct LoopCtx {
     poll: Poll,
     shutdown: RefCell<bool>,
@@ -85,6 +113,14 @@ struct LoopCtx {
 
 thread_local! {
     static CTX: LazyCell<LoopCtx> = LazyCell::new();
+    static CFG: RefCell<Config> = RefCell::default();
+}
+
+pub fn run_evloop_with_config<F>(config: Config, init: F) -> Result<(), Error>
+    where F: FnOnce() -> Result<(), Error>
+{
+    CFG.with(|cfg| *cfg.borrow_mut() = config);
+    run_evloop(init)
 }
 
 pub fn run_evloop<F>(init: F) -> Result<(), Error>
@@ -119,6 +155,7 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
         let mut pending_writes_or_reads = false;
 
         let mut events = Events::with_capacity(1024);
+        let cfg = CFG.with(|cfg| cfg.borrow().clone());
 
         while !*ctx.shutdown.borrow() {
             let poll_timeout = if pending_writes_or_reads {
@@ -179,40 +216,56 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                 }
             }
 
-            // read something from every readable connection
+            // do reads
             {
-                let rcnt = ctx.conns_readable.borrow().len();
-                // start from a random connection
-                if rcnt > 0 {
-                    for _ in 0 .. rand::thread_rng().gen_range(0, rcnt) {
-                        let mut conns = ctx.conns_readable.borrow_mut();
-                        let conn = conns.pop_front().unwrap();
-                        conns.push_back(conn);
+                let mut rcnt = ctx.conns_readable.borrow().len();
+                if cfg.randomize_work {
+                    // start from a random connection
+                    if rcnt > 0 {
+                        for _ in 0 .. rand::thread_rng().gen_range(0, rcnt) {
+                            let mut conns = ctx.conns_readable.borrow_mut();
+                            let conn = conns.pop_front().unwrap();
+                            conns.push_back(conn);
+                        }
                     }
                 }
-                for _ in 0 .. rcnt {
+                loop {
+                    if !cfg.work_until_would_block {
+                        // do some work for each connection and poll for more events
+                        if rcnt == 0 { break; }
+                        rcnt -= 1;
+                    }
                     let wconn = { ctx.conns_readable.borrow_mut().pop_front() };
                     if let Some(conn) = wconn.and_then(|wconn| wconn.upgrade()) {
                         if conn.do_read() {
                             pending_writes_or_reads = true;
                             ctx.conns_readable.borrow_mut().push_back(Rc::downgrade(&conn));
                         }
+                    } else {
+                        break;
                     }
                 }
             }
 
-            // write something to each writable connection
+            // do writes
             {
-                let wcnt = ctx.conns_writable.borrow().len();
-                // start from a random connection
-                if wcnt > 0 {
-                    for _ in 0 .. rand::thread_rng().gen_range(0, wcnt) {
-                        let mut conns = ctx.conns_writable.borrow_mut();
-                        let conn = conns.pop_front().unwrap();
-                        conns.push_back(conn);
+                let mut wcnt = ctx.conns_writable.borrow().len();
+                if cfg.randomize_work {
+                    // start from a random connection
+                    if wcnt > 0 {
+                        for _ in 0 .. rand::thread_rng().gen_range(0, wcnt) {
+                            let mut conns = ctx.conns_writable.borrow_mut();
+                            let conn = conns.pop_front().unwrap();
+                            conns.push_back(conn);
+                        }
                     }
                 }
-                for _ in 0 .. wcnt {
+                loop {
+                    if !cfg.work_until_would_block {
+                        // do some work for each connection and poll for more events
+                        if wcnt == 0 { break; }
+                        wcnt -= 1;
+                    }
                     let wconn = { ctx.conns_writable.borrow_mut().pop_front() };
                     if let Some(conn) = wconn.and_then(|wconn| wconn.upgrade()) {
                         if conn.do_write() {
@@ -224,6 +277,8 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                                 println!("MAX PENDING WRITE: {:?}", ctx.max_pending_write.borrow());
                             }
                         }
+                    } else {
+                        break;
                     }
                 }
             }
@@ -270,7 +325,9 @@ pub fn add_listener<H: 'static + AcceptHandler>(listener: TcpListener, handler: 
     })
 }
 
-pub fn add_connection<H: 'static + ConnectionHandler>(stream: TcpStream, handler: H) -> Result<usize, Error> {
+pub fn add_connection<H>(stream: TcpStream, handler: H) -> Result<usize, Error>
+    where H: 'static + ConnectionHandler,
+{
     CTX.with(|ctx| {
         let ctx = ctx.borrow().expect("not inside evloop");
         let id;

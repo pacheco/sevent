@@ -16,9 +16,6 @@ use ::circular_buf::CircularBuffer;
 use ::TokenKind;
 use ::Error;
 
-const READ_SIZE: usize = 16*1024;
-const WRITE_SIZE: usize = 16*1024;
-
 pub trait ConnectionHandler {
     /// called right after the connection is added to the event loop with `add_connection`.
     #[allow(unused)]
@@ -99,19 +96,23 @@ pub fn connection_write<F>(id: usize, f: F) -> Result<(), Error>
 }
 
 impl Connection {
-    pub fn new<H>(id: usize, stream: TcpStream, handler: H)
+    pub fn new<H>(id: usize,
+                  stream: TcpStream,
+                  handler: H)
                   -> Result<Self, Error>
         where H: 'static + ConnectionHandler,
     {
-        let conn = Connection {
-            id,
-            ready: RefCell::new(Ready::writable()),
-            rbuf: RefCell::new(CircularBuffer::with_capacity(READ_SIZE)),
-            wbuf: RefCell::new(CircularBuffer::with_capacity(WRITE_SIZE)),
-            inner: RefCell::new(stream),
-            handler: RefCell::new(Box::new(handler)),
-        };
-        Ok(conn)
+        super::CFG.with(|cfg| {
+            let conn = Connection {
+                id,
+                ready: RefCell::new(Ready::writable()),
+                rbuf: RefCell::new(CircularBuffer::with_capacity(cfg.borrow().max_read_size)),
+                wbuf: RefCell::new(CircularBuffer::with_capacity(cfg.borrow().max_write_size)),
+                inner: RefCell::new(stream),
+                handler: RefCell::new(Box::new(handler)),
+            };
+            Ok(conn)
+        })
     }
 
     pub fn handler_on_add(&self) {
@@ -141,7 +142,8 @@ impl Connection {
             let mut wbuf = self.wbuf.borrow_mut();
             let to_advance = {
                 let bytes = wbuf.bytes();
-                let up_to = min(WRITE_SIZE, bytes.len());
+                let max_write_size = super::CFG.with(|cfg| cfg.borrow().max_write_size);
+                let up_to = min(max_write_size, bytes.len());
                 match stream.write(&bytes[.. up_to]) {
                     Ok(n) => {
                         n
@@ -185,7 +187,8 @@ impl Connection {
         match {
             let mut stream = self.inner.borrow_mut();
             let bytes = unsafe { rbuf.bytes_mut() };
-            let up_to = min(READ_SIZE, bytes.len());
+            let max_read_size = super::CFG.with(|cfg| cfg.borrow().max_write_size);
+            let up_to = min(max_read_size, bytes.len());
             stream.read(&mut bytes[..up_to])
         } {
             Ok(0) => {
