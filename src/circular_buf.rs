@@ -48,6 +48,7 @@ impl CircularBuffer {
     }
 
     /// Makes sure the first 'cnt' available bytes are contiguous.
+    /// May be expensive as data is copied around.
     /// Returns false if there is not enough data.
     pub fn pullup(&mut self, cnt: usize) -> bool {
         if cnt > self.remaining {
@@ -73,6 +74,58 @@ impl CircularBuffer {
             }
             self.start = 0;
             true
+        }
+    }
+
+    /// Peeks the next cnt bytes if available. It doesn't modify the
+    /// circular buffer, but may need to create a temporary vec if the
+    /// data is not contiguous.
+    pub fn with_peek<F, T>(&mut self, cnt: usize, mut f: F)
+                           -> T
+        where F: FnMut(Option<&[u8]>) -> T,
+    {
+        if self.remaining < cnt {
+            // not enough available data
+            f(None)
+        } else {
+            {
+                // available contiguous data
+                let bytes = self.bytes();
+                if bytes.len() >= cnt {
+                    return f(Some(&bytes[..cnt]));
+                }
+            }
+            // data available but not contiguous
+            if cnt <= 32 {
+                // avoid allocation if peek is small
+                let mut tmp = [0; 32];
+                let tmp_ptr = tmp.as_mut_ptr();
+                let ptr = self.inner.as_mut_ptr();
+                let start_to_cap = self.inner.capacity() - self.start;
+                unsafe {
+                    ptr::copy_nonoverlapping(ptr.offset(self.start as isize),
+                                             tmp_ptr,
+                                             start_to_cap);
+                    ptr::copy_nonoverlapping(ptr,
+                                             tmp_ptr.offset(start_to_cap as isize),
+                                             cnt - start_to_cap);
+                }
+                f(Some(&tmp[..cnt]))
+            } else {
+                let mut tmp = Vec::with_capacity(cnt);
+                let tmp_ptr = tmp.as_mut_ptr();
+                let ptr = self.inner.as_mut_ptr();
+                let start_to_cap = self.inner.capacity() - self.start;
+                unsafe {
+                    ptr::copy_nonoverlapping(ptr.offset(self.start as isize),
+                                             tmp_ptr,
+                                             start_to_cap);
+                    ptr::copy_nonoverlapping(ptr,
+                                             tmp_ptr.offset(start_to_cap as isize),
+                                             cnt - start_to_cap);
+                }
+                f(Some(&tmp[..]))
+            }
         }
     }
 
@@ -102,19 +155,17 @@ impl<'a, M: DeserializeOwned> Iterator for BincodeFrameIterator<'a, M> {
 
     fn next(&mut self) -> Option<Self::Item> {
         // do we have a header?
-        if self.inner.pullup(4) {
-            let size = {
-                let hdr = &self.inner.bytes()[0..4];
-                BigEndian::read_u32(hdr) as usize
-            };
-            // do we have the data?
-            if self.inner.pullup(4 + size) {
-                let res = {
-                    let msg = &self.inner.bytes()[4..4+size];
-                    bincode::deserialize(msg)
-                };
-                self.inner.advance(4+size);
-                return Some(res);
+        let hdr = self.inner.with_peek(4, |hdr| {
+            hdr.map(|bytes| {
+                BigEndian::read_u32(bytes) as usize
+            })
+        });
+
+        if let Some(size) = hdr {
+            if self.inner.remaining() >= 4 + size {
+                self.inner.advance(4);
+                return Some(bincode::deserialize_from(&mut self.inner.reader(),
+                                                      bincode::Bounded(size as u64)));
             }
         }
         None
@@ -302,6 +353,42 @@ mod tests {
             // buffer should be reset since start/end have met
             assert_eq!(cb.bytes_mut().len(), 10);
         }
+    }
+
+    #[test]
+    fn circular_buffer_peek() {
+        let mut cb = CircularBuffer::with_capacity(10);
+        cb.with_peek(0, |buf| {
+            assert!(buf.is_some());
+        });
+        cb.with_peek(1, |buf| {
+            assert!(buf.is_none());
+        });
+
+        cb.put_u64::<BigEndian>(0x1122334455667788);
+        cb.with_peek(8, |buf| {
+            let bytes = buf.unwrap();
+            assert_eq!(BigEndian::read_u64(bytes), 0x1122334455667788);
+        });
+        cb.with_peek(9, |buf| {
+            assert!(buf.is_none());
+        });
+
+        assert_eq!(cb.get_u32::<BigEndian>(), 0x11223344); // read 4
+        assert_eq!(cb.get_u16::<BigEndian>(), 0x5566); // read 2
+        cb.with_peek(2, |buf| {
+            let bytes = buf.unwrap();
+            assert_eq!(BigEndian::read_u16(bytes), 0x7788);
+        });
+        cb.with_peek(3, |buf| {
+            assert!(buf.is_none());
+        });
+        cb.put_u64::<BigEndian>(0x1122334455667788); // put 8 => buffer full and starting at 6
+        cb.with_peek(10, |buf| {
+            let bytes = buf.unwrap();
+            assert_eq!(BigEndian::read_u16(&bytes[..2]), 0x7788);
+            assert_eq!(BigEndian::read_u64(&bytes[2..10]), 0x1122334455667788);
+        });
     }
 
     #[test]

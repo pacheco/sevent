@@ -34,11 +34,6 @@ impl sevent::ConnectionHandler for Echo {
 }
 
 fn main() {
-    let conn_cfg = sevent::ConnectionConfig {
-        max_read_size: 1*1024,
-        max_write_size: 1*1024,
-    };
-
     sevent::run_evloop(|| {
         let addr = "127.0.0.1:10000".parse().unwrap();
 
@@ -50,13 +45,9 @@ fn main() {
             match res {
                 Ok((stream, addr)) => {
                     stream.set_nodelay(true).unwrap();
-                    let id = sevent::add_connection_with_config(
-                        stream,
-                        conn_cfg.clone(),
-                        Echo {
-                            connections: connections.clone(),
-                        }
-                    ).unwrap();
+                    let id = sevent::add_connection(stream, Echo {
+                        connections: connections.clone(),
+                    }).unwrap();
                     connections.borrow_mut().insert(id);
                     println!("new connection {} from {:?}", id, addr);
                 }

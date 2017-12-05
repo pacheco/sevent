@@ -231,7 +231,7 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                 }
                 loop {
                     if !cfg.work_until_would_block {
-                        // do some work for each connection and poll for more events
+                        // work once with each connection and poll again
                         if rcnt == 0 { break; }
                         rcnt -= 1;
                     }
@@ -262,7 +262,7 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                 }
                 loop {
                     if !cfg.work_until_would_block {
-                        // do some work for each connection and poll for more events
+                        // work once with each connection and poll again
                         if wcnt == 0 { break; }
                         wcnt -= 1;
                     }
