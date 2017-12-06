@@ -43,6 +43,7 @@ pub use self::timer::TimeoutHandler;
 pub mod ext;
 
 use std::time::Duration;
+use std::time::Instant;
 use std::net::SocketAddr;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -65,6 +66,8 @@ use mio_more::timer as mio_timer;
 use slab::Slab;
 
 use lazycell::LazyCell;
+
+use ext::DurationExt;
 
 const TOKEN_KIND_BITS: usize = 3;
 const TOKEN_KIND_MASK: usize = 0b111;
@@ -107,6 +110,7 @@ struct LoopCtx {
     poll: Poll,
     shutdown: RefCell<bool>,
     max_pending_write: RefCell<usize>,
+    max_loop_exec_time: RefCell<Duration>,
     listeners: RefCell<Slab<Rc<Listener>>>,
     connects: RefCell<Slab<Rc<Connect>>>,
     timer: RefCell<mio_timer::Timer<Box<TimeoutHandler>>>,
@@ -137,6 +141,7 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                 poll: Poll::new().expect("could not create event poll"),
                 shutdown: RefCell::new(false),
                 max_pending_write: RefCell::new(0),
+                max_loop_exec_time: RefCell::new(Duration::from_secs(0)),
                 listeners: RefCell::new(Slab::new()),
                 connects: RefCell::new(Slab::new()),
                 timer: RefCell::new(mio_timer::Timer::default()),
@@ -166,11 +171,14 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
             } else {
                 None
             };
+
             match ctx.poll.poll(&mut events, poll_timeout) {
                 Ok(_) => (),
                 Err(ref err) if err.kind() == io::ErrorKind::Interrupted => continue,
                 Err(err) => return Err(Error::from(err)),
             }
+            let loop_start = Instant::now();
+
             for event in &events {
                 match event.token().to_id_kind() {
                     (id, TokenKind::Listener) => {
@@ -243,7 +251,7 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                                 if conn.do_write() {
                                     if *ctx.max_pending_write.borrow() < conn.wbuf.borrow().len() {
                                         *ctx.max_pending_write.borrow_mut() = conn.wbuf.borrow().len();
-                                        println!("MAX PENDING WRITE: {:?}", ctx.max_pending_write.borrow());
+                                        debug!("MAX PENDING WRITE: {:?}", ctx.max_pending_write.borrow());
                                     }
                                     pending_writes_or_reads = true;
                                     continue;
@@ -260,6 +268,14 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                         _ => true,
                     }
                 });
+            }
+            let exec_time = Instant::now().duration_since(loop_start);
+            {
+                let mut max_exec_time = ctx.max_loop_exec_time.borrow_mut();
+                if exec_time > *max_exec_time {
+                    debug!("MAX POLL EXEC TIME: {}", exec_time.as_nanosecs());
+                    *max_exec_time = exec_time;
+                }
             }
         }
         Ok(())

@@ -163,7 +163,7 @@ impl Connection {
                 self.ready.borrow_mut().remove(Ready::writable());
                 return false;
             } else {
-                error!("connection {}: {:?}", self.id, err);
+                debug!("connection {}: {:?}", self.id, err);
                 super::del(self.id, TokenKind::Connection).unwrap();
                 let mut handler = self.handler.borrow_mut();
                 handler.on_disconnect(self.id, Some(err.into()));
@@ -194,7 +194,7 @@ impl Connection {
         } {
             Ok(0) => {
                 // remote side closed
-                error!("connection {}: remote closed for writing", self.id);
+                debug!("connection {}: remote closed for writing", self.id);
                 // TODO: should we handle partial close?
                 super::del(self.id, TokenKind::Connection).unwrap();
                 let mut handler = self.handler.borrow_mut();
@@ -213,7 +213,7 @@ impl Connection {
                 return false;
             }
             Err(err) => {
-                error!("connection {}: {:?}", self.id, err);
+                debug!("connection {}: {:?}", self.id, err);
                 super::del(self.id, TokenKind::Connection).unwrap();
                 let mut handler = self.handler.borrow_mut();
                 handler.on_disconnect(self.id, Some(err.into()));

@@ -33,7 +33,7 @@ impl Listener {
                         self.handler.borrow_mut().on_accept(Ok((stream, addr)));
                     }
                     Err(err) => {
-                        error!("listener {} accept error: {:?}", self.id, err);
+                        debug!("listener {} accept error: {:?}", self.id, err);
                         self.handler.borrow_mut().on_accept(Err(err.into()));
                         super::del(self.id, TokenKind::Listener).unwrap();
                     }
