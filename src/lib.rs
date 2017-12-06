@@ -81,6 +81,8 @@ pub struct Config {
     pub randomize_work: bool,
     pub max_read_size: usize,
     pub max_write_size: usize,
+    pub work_until_would_block: bool,
+    pub max_loop_exec_time_us: Option<u64>,
     pub poll_timeout_ns: u32,
 }
 
@@ -91,6 +93,10 @@ impl std::default::Default for Config {
             poll_timeout_ns: DEFAULT_POLL_TIMEOUT_NS,
             /// Randomize order in which connections are handled at each loop tick
             randomize_work: true,
+            /// Whether all events should be handled before polling for more
+            work_until_would_block: false,
+            /// Set a time limit for loop execution before checking for more events
+            max_loop_exec_time_us: None,
             /// Maximum amount of bytes to read at each "read" syscall
             max_read_size: DEFAULT_MAX_READ_SIZE,
             /// Maximum amount of bytes to write at each "write" syscall
@@ -228,13 +234,22 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
             }
 
             // handle ready connections
-            {
+            loop {
                 let rcnt = ctx.conns_ready.borrow().len();
                 if cfg.randomize_work {
                     let mut rconn = ctx.conns_ready.borrow_mut();
                     rand::thread_rng().shuffle(&mut *rconn);
                 }
+                let mut exec_time_limit = false;
                 for i in 0 .. rcnt {
+                    // TODO: work on one connection at least?
+                    if let Some(limit) = cfg.max_loop_exec_time_us {
+                        if Instant::now().duration_since(loop_start).as_usecs() > limit {
+                            exec_time_limit = true;
+                            break;
+                        }
+                    }
+
                     let ready = { ctx.conns_ready.borrow_mut()[i].clone() };
                     match ready {
                         ReadyCtx::Read(wconn) => {
@@ -262,18 +277,33 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                         ReadyCtx::Done => continue,
                     }
                 }
-                ctx.conns_ready.borrow_mut().retain(|it| {
+
+                let mut conns_ready = ctx.conns_ready.borrow_mut();
+                conns_ready.retain(|it| {
                     match *it {
                         ReadyCtx::Done => false,
                         _ => true,
                     }
                 });
+
+                if exec_time_limit {
+                    break;
+                }
+
+                if !cfg.work_until_would_block {
+                    break;
+                }
+
+                if conns_ready.len() == 0 {
+                    break;
+                }
             }
+
             let exec_time = Instant::now().duration_since(loop_start);
             {
                 let mut max_exec_time = ctx.max_loop_exec_time.borrow_mut();
                 if exec_time > *max_exec_time {
-                    debug!("MAX POLL EXEC TIME: {}", exec_time.as_nanosecs());
+                    debug!("MAX LOOP EXEC TIME: {}", exec_time.as_nanosecs());
                     *max_exec_time = exec_time;
                 }
             }
