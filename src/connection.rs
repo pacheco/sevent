@@ -13,6 +13,7 @@ use mio::net::TcpStream;
 
 use ::circular_buf::CircularBuffer;
 
+use ::ReadyCtx;
 use ::TokenKind;
 use ::Error;
 
@@ -86,7 +87,7 @@ pub fn connection_write<F>(id: usize, f: F) -> Result<(), Error>
                 let was_writable = conn.is_writable();
                 f(&mut conn.wbuf.borrow_mut());
                 if conn.is_writable() && !was_writable {
-                    ctx.conns_writable.borrow_mut().push_back(Rc::downgrade(conn));
+                    ctx.conns_ready.borrow_mut().push(ReadyCtx::Write(Rc::downgrade(conn)));
                 }
                 Ok(())
             }

@@ -47,7 +47,6 @@ use std::net::SocketAddr;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::rc::Weak;
-use std::collections::VecDeque;
 use std::mem;
 use std::io;
 
@@ -77,8 +76,6 @@ const DEFAULT_MAX_WRITE_SIZE: usize = 16*1024;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
     pub randomize_work: bool,
-    pub read_until_would_block: bool,
-    pub write_until_would_block: bool,
     pub max_read_size: usize,
     pub max_write_size: usize,
     pub poll_timeout_ns: u32,
@@ -91,16 +88,19 @@ impl std::default::Default for Config {
             poll_timeout_ns: DEFAULT_POLL_TIMEOUT_NS,
             /// Randomize order in which connections are handled at each loop tick
             randomize_work: true,
-            /// Won't check for new events until all current writes are done
-            write_until_would_block: false,
-            /// Won't check for new events until all current reads are done
-            read_until_would_block: false,
             /// Maximum amount of bytes to read at each "read" syscall
             max_read_size: DEFAULT_MAX_READ_SIZE,
             /// Maximum amount of bytes to write at each "write" syscall
             max_write_size: DEFAULT_MAX_WRITE_SIZE,
         }
     }
+}
+
+#[derive(Clone)]
+enum ReadyCtx {
+    Read(Weak<Connection>),
+    Write(Weak<Connection>),
+    Done,
 }
 
 struct LoopCtx {
@@ -112,8 +112,7 @@ struct LoopCtx {
     timer: RefCell<mio_timer::Timer<Box<TimeoutHandler>>>,
     chans: RefCell<Slab<Rc<Chan>>>,
     conns: RefCell<Slab<Rc<Connection>>>,
-    conns_readable: RefCell<VecDeque<Weak<Connection>>>,
-    conns_writable: RefCell<VecDeque<Weak<Connection>>>,
+    conns_ready: RefCell<Vec<ReadyCtx>>,
 }
 
 thread_local! {
@@ -143,8 +142,7 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                 timer: RefCell::new(mio_timer::Timer::default()),
                 chans: RefCell::new(Slab::new()),
                 conns: RefCell::new(Slab::new()),
-                conns_readable: RefCell::new(VecDeque::new()),
-                conns_writable: RefCell::new(VecDeque::new()),
+                conns_ready: RefCell::new(Vec::new()),
             }
         });
 
@@ -212,90 +210,56 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                         let was_writable = conn.is_writable();
                         conn.ready(event.readiness());
                         if !was_readable && conn.is_readable() {
-                            ctx.conns_readable.borrow_mut().push_back(Rc::downgrade(&conn));
+                            ctx.conns_ready.borrow_mut().push(ReadyCtx::Read(Rc::downgrade(&conn)));
                         }
                         if !was_writable && conn.is_writable() {
-                            ctx.conns_writable.borrow_mut().push_back(Rc::downgrade(&conn));
+                            ctx.conns_ready.borrow_mut().push(ReadyCtx::Write(Rc::downgrade(&conn)));
                         }
                     }
                 }
             }
 
-            // do reads
+            // handle ready connections
             {
-                let mut rcnt = ctx.conns_readable.borrow().len();
+                let rcnt = ctx.conns_ready.borrow().len();
                 if cfg.randomize_work {
-                    // let mut rconn = ctx.conns_readable.borrow_mut();
-                    // let mut vec: Vec<_> = rconn.iter().cloned().collect();
-                    // rand::thread_rng().shuffle(&mut vec[..]);
-                    // *rconn = vec.into_iter().collect();
-
-                    // start from a random connection
-                    if rcnt > 0 {
-                        for _ in 0 .. rand::thread_rng().gen_range(0, rcnt) {
-                            let mut conns = ctx.conns_readable.borrow_mut();
-                            let conn = conns.pop_front().unwrap();
-                            conns.push_back(conn);
-                        }
-                    }
+                    let mut rconn = ctx.conns_ready.borrow_mut();
+                    rand::thread_rng().shuffle(&mut *rconn);
                 }
-                loop {
-                    if !cfg.read_until_would_block {
-                        // work once with each connection and poll again
-                        if rcnt == 0 { break; }
-                        rcnt -= 1;
-                    }
-                    let wconn = { ctx.conns_readable.borrow_mut().pop_front() };
-                    if let Some(conn) = wconn.and_then(|wconn| wconn.upgrade()) {
-                        if conn.do_read() {
-                            pending_writes_or_reads = true;
-                            ctx.conns_readable.borrow_mut().push_back(Rc::downgrade(&conn));
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-
-            // do writes
-            {
-                let mut wcnt = ctx.conns_writable.borrow().len();
-                if cfg.randomize_work {
-                    // let mut wconn = ctx.conns_writable.borrow_mut();
-                    // let mut vec: Vec<_> = wconn.iter().cloned().collect();
-                    // rand::thread_rng().shuffle(&mut vec[..]);
-                    // *wconn = vec.into_iter().collect();
-
-                    // start from a random connection
-                    if wcnt > 0 {
-                        for _ in 0 .. rand::thread_rng().gen_range(0, wcnt) {
-                            let mut conns = ctx.conns_writable.borrow_mut();
-                            let conn = conns.pop_front().unwrap();
-                            conns.push_back(conn);
-                        }
-                    }
-                }
-                loop {
-                    if !cfg.write_until_would_block {
-                        // work once with each connection and poll again
-                        if wcnt == 0 { break; }
-                        wcnt -= 1;
-                    }
-                    let wconn = { ctx.conns_writable.borrow_mut().pop_front() };
-                    if let Some(conn) = wconn.and_then(|wconn| wconn.upgrade()) {
-                        if conn.do_write() {
-                            pending_writes_or_reads = true;
-                            ctx.conns_writable.borrow_mut().push_back(Rc::downgrade(&conn));
-                        } else {
-                            if *ctx.max_pending_write.borrow() < conn.wbuf.borrow().len() {
-                                *ctx.max_pending_write.borrow_mut() = conn.wbuf.borrow().len();
-                                println!("MAX PENDING WRITE: {:?}", ctx.max_pending_write.borrow());
+                for i in 0 .. rcnt {
+                    let ready = { ctx.conns_ready.borrow_mut()[i % rcnt].clone() };
+                    match ready {
+                        ReadyCtx::Read(wconn) => {
+                            if let Some(conn) = wconn.upgrade() {
+                                if conn.do_read() {
+                                    pending_writes_or_reads = true;
+                                    continue;
+                                }
                             }
+                            *ctx.conns_ready.borrow_mut().get_mut(i % rcnt).unwrap() = ReadyCtx::Done;
                         }
-                    } else {
-                        break;
+                        ReadyCtx::Write(wconn) => {
+                            if let Some(conn) = wconn.upgrade() {
+                                if conn.do_write() {
+                                    if *ctx.max_pending_write.borrow() < conn.wbuf.borrow().len() {
+                                        *ctx.max_pending_write.borrow_mut() = conn.wbuf.borrow().len();
+                                        println!("MAX PENDING WRITE: {:?}", ctx.max_pending_write.borrow());
+                                    }
+                                    pending_writes_or_reads = true;
+                                    continue;
+                                }
+                            }
+                            *ctx.conns_ready.borrow_mut().get_mut(i % rcnt).unwrap() = ReadyCtx::Done;
+                        }
+                        ReadyCtx::Done => continue,
                     }
                 }
+                ctx.conns_ready.borrow_mut().retain(|it| {
+                    match *it {
+                        ReadyCtx::Done => false,
+                        _ => true,
+                    }
+                });
             }
         }
         Ok(())
