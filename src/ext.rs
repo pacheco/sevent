@@ -1,3 +1,4 @@
+use std;
 use std::io::Cursor;
 use std::marker::PhantomData;
 
@@ -64,5 +65,20 @@ impl<'a, M: DeserializeOwned> Iterator for BincodeFrameIterator<'a, M> {
 impl<'a, M: DeserializeOwned> Drop for BincodeFrameIterator<'a, M> {
     fn drop(&mut self) {
         self.inner.drain(..self.pos);
+    }
+}
+
+pub trait DurationExt {
+    fn as_nanosecs(&self) -> u64;
+    fn as_usecs(&self) -> u64;
+}
+
+impl DurationExt for std::time::Duration {
+    fn as_nanosecs(&self) -> u64 {
+        self.as_secs()*1_000_000_000 + self.subsec_nanos() as u64
+    }
+
+    fn as_usecs(&self) -> u64 {
+        self.as_secs()*1_000_000 + self.subsec_nanos() as u64/1000
     }
 }
