@@ -70,8 +70,7 @@ use lazycell::LazyCell;
 const TOKEN_KIND_BITS: usize = 3;
 const TOKEN_KIND_MASK: usize = 0b111;
 
-const POLL_TIMEOUT_NS: u32 = 10_000;
-
+const DEFAULT_POLL_TIMEOUT_NS: u32 = 10_000;
 const DEFAULT_MAX_READ_SIZE: usize = 16*1024;
 const DEFAULT_MAX_WRITE_SIZE: usize = 16*1024;
 
@@ -82,11 +81,14 @@ pub struct Config {
     pub write_until_would_block: bool,
     pub max_read_size: usize,
     pub max_write_size: usize,
+    pub poll_timeout_ns: u32,
 }
 
 impl std::default::Default for Config {
     fn default() -> Self {
         Config {
+            /// Time to block waiting for new events on poll (for when there are still pending events)
+            poll_timeout_ns: DEFAULT_POLL_TIMEOUT_NS,
             /// Randomize order in which connections are handled at each loop tick
             randomize_work: true,
             /// Won't check for new events until all current writes are done
@@ -162,7 +164,7 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
 
         while !*ctx.shutdown.borrow() {
             let poll_timeout = if pending_writes_or_reads {
-                Some(Duration::new(0, POLL_TIMEOUT_NS))
+                Some(Duration::new(0, cfg.poll_timeout_ns))
             } else {
                 None
             };
