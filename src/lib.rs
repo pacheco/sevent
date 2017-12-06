@@ -227,7 +227,7 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                     rand::thread_rng().shuffle(&mut *rconn);
                 }
                 for i in 0 .. rcnt {
-                    let ready = { ctx.conns_ready.borrow_mut()[i % rcnt].clone() };
+                    let ready = { ctx.conns_ready.borrow_mut()[i].clone() };
                     match ready {
                         ReadyCtx::Read(wconn) => {
                             if let Some(conn) = wconn.upgrade() {
@@ -236,7 +236,7 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                                     continue;
                                 }
                             }
-                            *ctx.conns_ready.borrow_mut().get_mut(i % rcnt).unwrap() = ReadyCtx::Done;
+                            *ctx.conns_ready.borrow_mut().get_mut(i).unwrap() = ReadyCtx::Done;
                         }
                         ReadyCtx::Write(wconn) => {
                             if let Some(conn) = wconn.upgrade() {
@@ -249,7 +249,7 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
                                     continue;
                                 }
                             }
-                            *ctx.conns_ready.borrow_mut().get_mut(i % rcnt).unwrap() = ReadyCtx::Done;
+                            *ctx.conns_ready.borrow_mut().get_mut(i).unwrap() = ReadyCtx::Done;
                         }
                         ReadyCtx::Done => continue,
                     }
