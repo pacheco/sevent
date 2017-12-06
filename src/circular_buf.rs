@@ -199,7 +199,7 @@ impl BufMut for CircularBuffer {
     }
 
     unsafe fn bytes_mut(&mut self) -> &mut [u8] {
-        // check if we need to alloc more space
+        // check if we're full and need to alloc more space
         if self.remaining == self.inner.capacity() {
             let cap = self.inner.capacity();
             if self.start == 0 {
