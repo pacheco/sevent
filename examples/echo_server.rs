@@ -5,14 +5,14 @@ extern crate bytes;
 use bytes::Buf;
 use bytes::BufMut;
 
-use sevent::circular_buf::CircularBuffer;
+use sevent::iobuf::IoBuffer;
 
 use mio::net::TcpStream;
 
 struct Echo;
 
 impl sevent::ConnectionHandler for Echo {
-    fn on_read(&mut self, id: usize, buf: &mut CircularBuffer) {
+    fn on_read(&mut self, id: usize, buf: &mut IoBuffer) {
         sevent::connection_write(id, |wbuf| {
             std::io::copy(&mut buf.reader(), &mut wbuf.writer()).unwrap();
         }).unwrap();

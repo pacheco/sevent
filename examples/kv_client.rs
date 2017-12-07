@@ -15,7 +15,7 @@ use lazycell::LazyCell;
 
 use mio_more::channel;
 
-use sevent::circular_buf::CircularBuffer;
+use sevent::iobuf::IoBuffer;
 
 #[derive(Serialize,Deserialize)]
 enum Request {
@@ -88,7 +88,7 @@ impl sevent::ConnectionHandler for ClientConn {
         }).unwrap();
     }
 
-    fn on_read(&mut self, _conn_id: usize, buf: &mut CircularBuffer) {
+    fn on_read(&mut self, _conn_id: usize, buf: &mut IoBuffer) {
         for msg in buf.drain_frames_bincode() {
             self.reply_tx.borrow().unwrap().send(msg.unwrap()).unwrap();
         }

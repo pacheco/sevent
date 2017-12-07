@@ -2,7 +2,6 @@ use std::cmp::min;
 use std::cell::RefCell;
 use std::io::ErrorKind::WouldBlock;
 use std::io::Read;
-use std::io::Write;
 use std::rc::Rc;
 
 use bytes::Buf;
@@ -11,7 +10,7 @@ use bytes::BufMut;
 use mio::Ready;
 use mio::net::TcpStream;
 
-use ::circular_buf::CircularBuffer;
+use ::iobuf::IoBuffer;
 
 use ::ReadyCtx;
 use ::TokenKind;
@@ -24,7 +23,7 @@ pub trait ConnectionHandler {
     /// called whenever there is new data in the connection's read buffer.
     /// The default implementation simply discards read data.
     #[allow(unused)]
-    fn on_read(&mut self, id: usize, buf: &mut CircularBuffer) {
+    fn on_read(&mut self, id: usize, buf: &mut IoBuffer) {
         let remaining = buf.remaining();
         buf.advance(remaining);
     }
@@ -40,7 +39,7 @@ pub trait ConnectionHandler {
 }
 
 pub struct ConnectionHandlerClosures<R,D,W>
-    where R: FnMut(usize, &mut CircularBuffer),
+    where R: FnMut(usize, &mut IoBuffer),
           D: FnMut(usize, Option<Error>),
           W: FnMut(usize),
 {
@@ -51,11 +50,11 @@ pub struct ConnectionHandlerClosures<R,D,W>
 }
 
 impl<R, D, W> ConnectionHandler for ConnectionHandlerClosures<R,D,W>
-    where R: FnMut(usize, &mut CircularBuffer),
+    where R: FnMut(usize, &mut IoBuffer),
           D: FnMut(usize, Option<Error>),
           W: FnMut(usize),
 {
-    fn on_read(&mut self, id: usize, buf: &mut CircularBuffer) {
+    fn on_read(&mut self, id: usize, buf: &mut IoBuffer) {
         (self.on_read)(id, buf)
     }
 
@@ -72,13 +71,13 @@ pub struct Connection {
     pub id: usize,
     pub inner: RefCell<TcpStream>,
     pub ready: RefCell<Ready>,
-    pub rbuf: RefCell<CircularBuffer>,
-    pub wbuf: RefCell<CircularBuffer>,
+    pub rbuf: RefCell<IoBuffer>,
+    pub wbuf: RefCell<IoBuffer>,
     handler: RefCell<Box<ConnectionHandler>>,
 }
 
 pub fn connection_write<F>(id: usize, f: F) -> Result<(), Error>
-    where F: FnOnce(&mut CircularBuffer),
+    where F: FnOnce(&mut IoBuffer),
 {
     super::CTX.with(|ctx| {
         let ctx = ctx.borrow().expect("not inside evloop");
@@ -107,8 +106,8 @@ impl Connection {
             let conn = Connection {
                 id,
                 ready: RefCell::new(Ready::writable()),
-                rbuf: RefCell::new(CircularBuffer::with_capacity(cfg.borrow().max_read_size)),
-                wbuf: RefCell::new(CircularBuffer::with_capacity(cfg.borrow().max_write_size)),
+                rbuf: RefCell::new(IoBuffer::with_capacity(cfg.borrow().max_read_size)),
+                wbuf: RefCell::new(IoBuffer::with_capacity(cfg.borrow().max_write_size)),
                 inner: RefCell::new(stream),
                 handler: RefCell::new(Box::new(handler)),
             };
@@ -139,13 +138,13 @@ impl Connection {
         assert!(!self.to_write() > 0);
         let mut write_err = None;
         {
-            let mut stream = self.inner.borrow_mut();
+            let stream = self.inner.borrow_mut();
             let mut wbuf = self.wbuf.borrow_mut();
             let to_advance = {
-                let bytes = wbuf.bytes();
-                let max_write_size = super::CFG.with(|cfg| cfg.borrow().max_write_size);
-                let up_to = min(max_write_size, bytes.len());
-                match stream.write(&bytes[.. up_to]) {
+                // let bytes = wbuf.bytes();
+                // let max_write_size = super::CFG.with(|cfg| cfg.borrow().max_write_size);
+                // let up_to = min(max_write_size, bytes.len());
+                match wbuf.writev_to(&*stream) {
                     Ok(n) => {
                         n
                     }
@@ -187,8 +186,9 @@ impl Connection {
         let mut rbuf = self.rbuf.borrow_mut();
         match {
             let mut stream = self.inner.borrow_mut();
-            let bytes = unsafe { rbuf.bytes_mut() };
             let max_read_size = super::CFG.with(|cfg| cfg.borrow().max_write_size);
+            rbuf.reserve(max_read_size);
+            let bytes = unsafe { rbuf.bytes_mut() };
             let up_to = min(max_read_size, bytes.len());
             stream.read(&mut bytes[..up_to])
         } {

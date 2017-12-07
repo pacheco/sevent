@@ -18,6 +18,9 @@ serde_derive = "1.0"
 bytes = "0.4"
 bincode = "0.9"
 
+iovec = "0.1"
+libc = "0.2"
+
 [dev-dependencies]
 serde_derive = "1.0"
 histogram = "0.6"

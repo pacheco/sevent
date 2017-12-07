@@ -18,21 +18,21 @@ use serde::de::DeserializeOwned;
 const INITIAL_CAP: usize = 1024;
 
 /// Circular Buffer which grows on demand and implements `bytes::{Buf,BufMut}`.
-pub struct CircularBuffer {
+pub struct IoBuffer {
     inner: Vec<u8>,
     start: usize,
     /// amount of data in the buffer
     remaining: usize,
 }
 
-impl CircularBuffer {
+impl IoBuffer {
     pub fn new() -> Self {
-        CircularBuffer::with_capacity(0)
+        IoBuffer::with_capacity(0)
     }
 
     pub fn with_capacity(cap: usize) -> Self {
         let inner = Vec::with_capacity(cap);
-        CircularBuffer {
+        IoBuffer {
             inner,
             start: 0,
             remaining: 0,
@@ -146,7 +146,7 @@ impl CircularBuffer {
 }
 
 pub struct BincodeFrameIterator<'a, M: DeserializeOwned> {
-    inner: &'a mut CircularBuffer,
+    inner: &'a mut IoBuffer,
     phantom: PhantomData<M>,
 }
 
@@ -178,7 +178,7 @@ impl<'a, M: DeserializeOwned> Drop for BincodeFrameIterator<'a, M> {
     }
 }
 
-impl BufMut for CircularBuffer {
+impl BufMut for IoBuffer {
     fn remaining_mut(&self) -> usize {
         std::usize::MAX
     }
@@ -190,10 +190,10 @@ impl BufMut for CircularBuffer {
         // returned by a bytes_mut, so we assert to catch bugs
         if end >= self.start {
             assert!(end + cnt <= self.inner.capacity(),
-                    "CircularBuffer advance_mut past what bytes_mut would return");
+                    "IoBuffer advance_mut past what bytes_mut would return");
         } else {
             assert!(end + cnt <= self.start,
-                    "CircularBuffer advance_mut past what bytes_mut would return");
+                    "IoBuffer advance_mut past what bytes_mut would return");
         }
         self.remaining += cnt;
     }
@@ -241,7 +241,7 @@ impl BufMut for CircularBuffer {
     }
 }
 
-impl Buf for CircularBuffer {
+impl Buf for IoBuffer {
     fn remaining(&self) -> usize {
         self.remaining
     }
@@ -270,13 +270,13 @@ mod tests {
 
     #[test]
     fn circular_buffer_new() {
-        let mut cb = CircularBuffer::new();
+        let mut cb = IoBuffer::new();
         assert_eq!(cb.remaining(), 0);
         unsafe {
             assert_eq!(cb.bytes_mut().len(), INITIAL_CAP);
         }
 
-        let mut cb = CircularBuffer::with_capacity(100);
+        let mut cb = IoBuffer::with_capacity(100);
         assert_eq!(cb.remaining(), 0);
         unsafe {
             assert_eq!(cb.bytes_mut().len(), 100);
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn circular_buffer_put() {
-        let mut cb = CircularBuffer::new();
+        let mut cb = IoBuffer::new();
         cb.put_i64::<BigEndian>(42);
         cb.put_i64::<BigEndian>(123);
         cb.put_i64::<BigEndian>(-21444);
@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn circular_buffer_doubles_capacity() {
-        let mut cb = CircularBuffer::with_capacity(10);
+        let mut cb = IoBuffer::with_capacity(10);
         cb.put_i64::<BigEndian>(42);
         cb.put_i64::<BigEndian>(32);
         unsafe {
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn circular_buffer_start_after_end() {
-        let mut cb = CircularBuffer::with_capacity(10);
+        let mut cb = IoBuffer::with_capacity(10);
         cb.put_i32::<BigEndian>(42); // advance end by 4;
         unsafe {
             assert_eq!(cb.bytes_mut().len(), 6);
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn circular_buffer_peek() {
-        let mut cb = CircularBuffer::with_capacity(10);
+        let mut cb = IoBuffer::with_capacity(10);
         cb.with_peek(0, |buf| {
             assert!(buf.is_some());
         });
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn circular_buffer_pullup() {
-        let mut cb = CircularBuffer::with_capacity(10);
+        let mut cb = IoBuffer::with_capacity(10);
         assert!(cb.pullup(0));
         assert!(!cb.pullup(1));
 
@@ -421,7 +421,7 @@ mod tests {
 
     #[test]
     fn circular_buffer_bincode() {
-        let mut cb = CircularBuffer::with_capacity(3);
+        let mut cb = IoBuffer::with_capacity(3);
         let msg0 = (1u64, Some(true), "foobar".to_owned());
         let msg1 = (1234u64, Some(false), "bladsf lakds jfkjsa kfdjds".to_owned());
         cb.put_frame_bincode(&msg0).unwrap();

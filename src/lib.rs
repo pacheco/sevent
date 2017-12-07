@@ -11,12 +11,15 @@ extern crate serde_derive;
 extern crate serde;
 extern crate rand;
 
+extern crate iovec;
+extern crate libc;
+
 use rand::Rng;
 
 pub mod errors;
 pub use errors::Error;
 
-pub mod circular_buf;
+pub mod iobuf;
 
 mod connection;
 use self::connection::Connection;
