@@ -19,7 +19,7 @@ pub trait VecExt {
 
 impl VecExt for Vec<u8> {
     fn put_frame_bincode<M: Serialize>(&mut self, msg: &M) -> Result<(), Error> {
-        let size = bincode::serialized_size(msg) as usize;
+        let size = bincode::serialized_size(msg)? as usize;
         // reserve space for the msg and header
         self.reserve(size + 4);
         // write the length header
@@ -28,7 +28,7 @@ impl VecExt for Vec<u8> {
         let new_len = self.len() + size;
         unsafe { self.set_len(new_len); }
         let mut cursor = Cursor::new(&mut self[new_len - size .. new_len]);
-        bincode::serialize_into(&mut cursor, msg, bincode::Bounded(size as u64))?;
+        bincode::serialize_into(&mut cursor, msg)?;
         Ok(())
     }
 

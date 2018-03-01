@@ -4,10 +4,10 @@ version = "0.1.0"
 authors = ["Leandro Pacheco <contact@leandropacheco.com>"]
 
 [dependencies]
-log = "0.3"
-env_logger = "0.4"
-lazycell = "0.5"
-rand = "0.3"
+log = "0.4"
+env_logger = "0.5.4"
+lazycell = "0.6"
+rand = "0.4"
 
 mio = "0.6"
 mio-more = "0.1"
@@ -16,7 +16,7 @@ slab = "0.4"
 serde = "1.0"
 serde_derive = "1.0"
 bytes = "0.4"
-bincode = "0.9"
+bincode = "1.0"
 
 iovec = "0.1"
 libc = "0.2"

@@ -155,10 +155,10 @@ impl IoBuffer {
     }
 
     pub fn put_frame_bincode<M: Serialize>(&mut self, msg: &M) -> Result<(), bincode::Error> {
-        let size = bincode::serialized_size(msg) as usize;
+        let size = bincode::serialized_size(msg)? as usize;
         // write the length header
         self.put_u32::<BigEndian>(size as u32);
-        bincode::serialize_into(&mut self.writer(), msg, bincode::Bounded(size as u64))?;
+        bincode::serialize_into(&mut self.writer(), msg)?;
         Ok(())
     }
 
@@ -189,8 +189,7 @@ impl<'a, M: DeserializeOwned> Iterator for BincodeFrameIterator<'a, M> {
         if let Some(size) = hdr {
             if self.inner.remaining() >= 4 + size {
                 self.inner.advance(4);
-                return Some(bincode::deserialize_from(&mut self.inner.reader(),
-                                                      bincode::Bounded(size as u64)));
+                return Some(bincode::deserialize_from(&mut self.inner.reader()));
             }
         }
         None
