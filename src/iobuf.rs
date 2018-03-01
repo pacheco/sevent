@@ -93,7 +93,7 @@ impl IoBuffer {
     }
 
     /// Peeks the next cnt bytes if available. It doesn't modify the
-    /// circular buffer, but may need to create a temporary vec if the
+    /// buffer, but may need to create a temporary vec if the
     /// data is not contiguous.
     pub fn with_peek<F, T>(&mut self, cnt: usize, mut f: F)
                            -> T
@@ -133,13 +133,13 @@ impl IoBuffer {
                 f(Some(&tmp[..cnt]))
             } else {
                 let mut tmp = Vec::with_capacity(cnt);
-                let tmp_ptr = tmp.as_mut_ptr();
+                let tmp_ptr: *mut u8 = tmp.as_mut_ptr();
                 let mut off: isize = 0;
                 let mut curidx: usize = 0;
                 while (off as usize) < cnt {
                     let cur = self.inner.get_mut(curidx).unwrap();
                     let pos = cur.position() as isize;
-                    let ptr = cur.get_mut().as_mut_ptr();
+                    let ptr: *const u8  = cur.get_mut().as_ptr();
                     unsafe {
                         let to_copy = cmp::min(cnt - off as usize, cur.remaining());
                         ptr::copy_nonoverlapping(ptr.offset(pos),
@@ -281,7 +281,7 @@ mod tests {
     use bytes::BigEndian;
 
     #[test]
-    fn circular_buffer_new() {
+    fn buffer_new() {
         let mut cb = IoBuffer::new();
         assert_eq!(cb.remaining(), 0);
         unsafe {
@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[test]
-    fn circular_buffer_put() {
+    fn buffer_put() {
         let mut cb = IoBuffer::new();
         cb.put_i64::<BigEndian>(42);
         cb.put_i64::<BigEndian>(123);
@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn circular_buffer_peek() {
+    fn buffer_peek() {
         let mut cb = IoBuffer::with_capacity(10);
         cb.with_peek(0, |buf| {
             assert!(buf.is_some());
@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn circular_buffer_reserve() {
+    fn buffer_reserve() {
         let mut cb = IoBuffer::new();
         unsafe {
             cb.reserve(1);
@@ -368,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn circular_buffer_bincode() {
+    fn buffer_bincode() {
         let mut cb = IoBuffer::with_capacity(3);
         let msg0 = (1u64, Some(true), "foobar".to_owned());
         let msg1 = (1234u64, Some(false), "bladsf lakds jfkjsa kfdjds".to_owned());
