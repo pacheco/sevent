@@ -21,6 +21,8 @@ pub use errors::Error;
 
 pub mod iobuf;
 
+pub mod utils;
+
 mod connection;
 use self::connection::Connection;
 pub use self::connection::ConnectionHandler;
