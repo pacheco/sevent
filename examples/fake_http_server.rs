@@ -7,7 +7,7 @@ use bytes::BufMut;
 
 use mio::net::TcpListener;
 
-const RESPONSE: &'static str = "HTTP/1.1 200 OK\r
+const RESPONSE: &str = "HTTP/1.1 200 OK\r
 Content-Length: 14\r
 \r
 Hello World\r
@@ -45,6 +45,6 @@ fn main() {
                 wbuf.put_slice(RESPONSE.as_bytes());
             }).unwrap()
         }).unwrap();
-        Ok(())
+        Ok::<_, sevent::Error>(())
     }).unwrap();
 }

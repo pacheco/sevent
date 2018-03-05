@@ -105,7 +105,6 @@ fn main() {
                 Err(err) => panic!(err),
             }
         }).unwrap();
-
-        Ok(())
+        Ok::<_, sevent::Error>(())
     }).unwrap();
 }

@@ -25,6 +25,7 @@ const MIN_CAP: usize = 32;
 const IOVEC_MAX_LEN: usize = 128;
 
 /// IO Buffer implementing `bytes::{Buf,BufMut}`.
+#[derive(Default)]
 pub struct IoBuffer {
     inner: VecDeque<Cursor<Vec<u8>>>,
     /// amount of data in the buffer
@@ -51,7 +52,7 @@ impl IoBuffer {
         let mut resize = false;
         if let Some(cur) = self.inner.back_mut() {
             if cur.get_mut().capacity() - cur.get_mut().len() < cnt {
-                if cur.get_mut().len() == 0 {
+                if cur.get_mut().is_empty() {
                     resize = true;
                 } else {
                     alloc = true;
@@ -83,11 +84,15 @@ impl IoBuffer {
         self.remaining
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn writev_to(&self, stream: &mio::net::TcpStream) -> std::io::Result<usize> {
         let mut iovecs: [&IoVec; IOVEC_MAX_LEN] = unsafe { std::mem::uninitialized() };
         let cnt = cmp::min(IOVEC_MAX_LEN, self.inner.len());
         for i in 0 .. cnt {
-            iovecs[i] = self.inner.get(i).unwrap().bytes().into();
+            iovecs[i] = self.inner[i].bytes().into();
         }
         stream.write_bufs(&iovecs[.. cnt])
     }
@@ -118,7 +123,7 @@ impl IoBuffer {
                 let mut off: isize = 0;
                 let mut curidx: usize = 0;
                 while (off as usize) < cnt {
-                    let cur = self.inner.get_mut(curidx).unwrap();
+                    let cur = &mut self.inner[curidx];
                     let pos = cur.position() as isize;
                     let ptr = cur.get_mut().as_mut_ptr();
                     unsafe {
@@ -137,7 +142,7 @@ impl IoBuffer {
                 let mut off: isize = 0;
                 let mut curidx: usize = 0;
                 while (off as usize) < cnt {
-                    let cur = self.inner.get_mut(curidx).unwrap();
+                    let cur = &mut self.inner[curidx];
                     let pos = cur.position() as isize;
                     let ptr: *const u8  = cur.get_mut().as_ptr();
                     unsafe {
@@ -162,7 +167,7 @@ impl IoBuffer {
         Ok(())
     }
 
-    pub fn drain_frames_bincode<'a, M: DeserializeOwned>(&'a mut self) -> BincodeFrameIterator<'a, M> {
+    pub fn drain_frames_bincode<M: DeserializeOwned>(&mut self) -> BincodeFrameIterator<M> {
         BincodeFrameIterator {
             inner: self,
             phantom: PhantomData,

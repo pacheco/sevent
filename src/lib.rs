@@ -133,17 +133,19 @@ thread_local! {
     static CFG: RefCell<Config> = RefCell::default();
 }
 
-pub fn run_evloop_with_config<F>(config: Config, init: F) -> Result<(), Error>
-    where F: FnOnce() -> Result<(), Error>
+pub fn run_evloop_with_config<F, E>(config: Config, init: F) -> Result<(), E>
+    where E: std::fmt::Debug + From<std::io::Error>,
+          F: FnOnce() -> Result<(), E>
 {
     CFG.with(|cfg| *cfg.borrow_mut() = config);
     run_evloop(init)
 }
 
-pub fn run_evloop<F>(init: F) -> Result<(), Error>
-    where F: FnOnce() -> Result<(), Error>
+pub fn run_evloop<F, E: std::fmt::Debug>(init: F) -> Result<(), E>
+    where E: std::fmt::Debug + From<std::io::Error>,
+          F: FnOnce() -> Result<(), E>
 {
-    CTX.with(|ctx| -> Result<(), Error> {
+    CTX.with(|ctx| -> Result<(), E> {
         // create the LoopCtx
         let ctx = ctx.borrow_with(|| {
             LoopCtx {
@@ -184,7 +186,7 @@ pub fn run_evloop<F>(init: F) -> Result<(), Error>
             match ctx.poll.poll(&mut events, poll_timeout) {
                 Ok(_) => (),
                 Err(ref err) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Err(err) => return Err(Error::from(err)),
+                Err(err) => return Err(E::from(err)),
             }
             let loop_start = Instant::now();
 
@@ -332,7 +334,7 @@ pub fn set_timeout<H: 'static + TimeoutHandler>(after: Duration, handler: H) -> 
 pub fn cancel_timeout(timeout: &mio_timer::Timeout) -> Option<Box<TimeoutHandler>> {
     CTX.with(|ctx| {
         let ctx = ctx.borrow().expect("not inside evloop");
-        ctx.timer.borrow_mut().cancel_timeout(&timeout)
+        ctx.timer.borrow_mut().cancel_timeout(timeout)
     })
 }
 
@@ -383,7 +385,7 @@ pub fn add_connect<H: 'static + ConnectHandler>(addr: SocketAddr, handler: H) ->
         poll_register(id, TokenKind::Connect, &stream, Ready::writable(), PollOpt::edge());
         let connect = Connect {
             id,
-            addr: addr,
+            addr,
             inner: RefCell::new(stream),
             handler: RefCell::new(Box::new(handler)),
         };

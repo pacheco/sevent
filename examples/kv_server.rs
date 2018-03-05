@@ -63,6 +63,6 @@ fn main() {
     sevent::run_evloop(|| {
         let listener = TcpListener::bind(&"127.0.0.1:10000".parse().unwrap()).unwrap();
         sevent::add_listener(listener, Server { kv: Rc::default() }).unwrap();
-        Ok(())
+        Ok::<_, sevent::Error>(())
     }).unwrap();
 }

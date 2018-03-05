@@ -173,9 +173,9 @@ impl Connection {
         if self.to_write() == 0 {
             let mut handler = self.handler.borrow_mut();
             handler.on_write_finished(self.id);
-            return false;
+            false
         } else {
-            return true;
+            true
         }
     }
 
@@ -199,25 +199,25 @@ impl Connection {
                 super::del(self.id, TokenKind::Connection).unwrap();
                 let mut handler = self.handler.borrow_mut();
                 handler.on_disconnect(self.id, None);
-                return false;
+                false
             }
             Ok(n) => {
                 unsafe { rbuf.advance_mut(n) };
                 // we read something
                 let mut handler = self.handler.borrow_mut();
                 handler.on_read(self.id, &mut rbuf);
-                return true;
+                true
             }
             Err(ref err) if err.kind() == WouldBlock => {
                 self.ready.borrow_mut().remove(Ready::readable());
-                return false;
+                false
             }
             Err(err) => {
                 debug!("connection {}: {:?}", self.id, err);
                 super::del(self.id, TokenKind::Connection).unwrap();
                 let mut handler = self.handler.borrow_mut();
                 handler.on_disconnect(self.id, Some(err.into()));
-                return false;
+                false
             }
         }
     }

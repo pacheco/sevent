@@ -22,7 +22,7 @@ struct Echo {
 }
 
 pub fn duration_as_usecs(d: Duration) -> u64 {
-    d.as_secs()*1000000 + d.subsec_nanos() as u64/1000
+    d.as_secs()*1000000 + u64::from(d.subsec_nanos())/1000
 }
 
 impl sevent::ConnectionHandler for Echo {
@@ -124,6 +124,6 @@ fn main() {
                 }
             }
         }).unwrap();
-        Ok(())
+        Ok::<_, sevent::Error>(())
     }).unwrap();
 }

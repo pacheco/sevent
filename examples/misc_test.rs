@@ -41,6 +41,6 @@ fn main() {
                 println!("got {} from chan {}", msg, id);
             }
         }).unwrap();
-        Ok(())
+        Ok::<_, sevent::Error>(())
     }).unwrap();
 }

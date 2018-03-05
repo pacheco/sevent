@@ -38,6 +38,6 @@ fn main() {
             }
         }).unwrap();
         println!("listener with id {:?}", id);
-        Ok(())
+        Ok::<_, sevent::Error>(())
     }).unwrap();
 }

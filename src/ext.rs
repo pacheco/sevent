@@ -14,7 +14,7 @@ use ::Error;
 
 pub trait VecExt {
     fn put_frame_bincode<M: Serialize>(&mut self, msg: &M) -> Result<(), Error>;
-    fn drain_frames_bincode<'a, M: DeserializeOwned>(&'a mut self) -> BincodeFrameIterator<'a, M>;
+    fn drain_frames_bincode<M: DeserializeOwned>(&mut self) -> BincodeFrameIterator<M>;
 }
 
 impl VecExt for Vec<u8> {
@@ -32,7 +32,7 @@ impl VecExt for Vec<u8> {
         Ok(())
     }
 
-    fn drain_frames_bincode<'a, M: DeserializeOwned>(&'a mut self) -> BincodeFrameIterator<'a, M> {
+    fn drain_frames_bincode<M: DeserializeOwned>(&mut self) -> BincodeFrameIterator<M> {
         BincodeFrameIterator {
             inner: self,
             pos: 0,
@@ -75,10 +75,10 @@ pub trait DurationExt {
 
 impl DurationExt for std::time::Duration {
     fn as_nanosecs(&self) -> u64 {
-        self.as_secs()*1_000_000_000 + self.subsec_nanos() as u64
+        self.as_secs()*1_000_000_000 + u64::from(self.subsec_nanos())
     }
 
     fn as_usecs(&self) -> u64 {
-        self.as_secs()*1_000_000 + self.subsec_nanos() as u64/1000
+        self.as_secs()*1_000_000 + u64::from(self.subsec_nanos())/1000
     }
 }
