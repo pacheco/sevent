@@ -30,7 +30,7 @@ pub trait ConnectionHandler {
     /// called when the connection is disconnected. There is no need
     /// to call del: the connection automatically deletes itself on
     /// disconnect.
-    /// IMPORTANT: it is NOT called when the connection is explicitly deleted.
+    /// IMPORTANT: it is NOT called after a `sevent::del` for the connection
     #[allow(unused)]
     fn on_disconnect(&mut self, id: usize, error: Option<Error>) {}
     /// called whenever the connection completely empties is write buffer.
