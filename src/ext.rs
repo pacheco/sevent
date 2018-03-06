@@ -71,6 +71,7 @@ impl<'a, M: DeserializeOwned> Drop for BincodeFrameIterator<'a, M> {
 pub trait DurationExt {
     fn as_nanosecs(&self) -> u64;
     fn as_usecs(&self) -> u64;
+    fn as_millis(&self) -> u64;
 }
 
 impl DurationExt for std::time::Duration {
@@ -80,5 +81,9 @@ impl DurationExt for std::time::Duration {
 
     fn as_usecs(&self) -> u64 {
         self.as_secs()*1_000_000 + u64::from(self.subsec_nanos())/1000
+    }
+
+    fn as_millis(&self) -> u64 {
+        self.as_secs()*1_000 + u64::from(self.subsec_nanos())/1_000_000
     }
 }
